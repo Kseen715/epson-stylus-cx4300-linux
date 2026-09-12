@@ -186,8 +186,10 @@ use the scanner again.
 
 Verified on both platforms against real hardware: identify, 75 dpi preview,
 cropped scans at 300 dpi and full-bed scans at 150 dpi. Linux and Windows
-produce the same framing and the same output dimensions. Plane padding is
-confirmed at 75, 150 and 300 dpi.
+produce the same framing and the same output dimensions. The plane padding rule
+(a multiple of 16 pixels) was measured from raw wire data at five different
+widths, including a crop width that distinguishes it from 32 and 64 — see
+[PROTOCOL.md](PROTOCOL.md).
 
 Not verified: 600 dpi. It should work, but a full-bed 600 dpi scan is ~107 MB
 over this device's USB 1.1 link, so time it before assuming a timeout is a bug.

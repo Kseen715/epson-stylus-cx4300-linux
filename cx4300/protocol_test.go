@@ -153,11 +153,17 @@ func TestGammaTable(t *testing.T) {
 }
 
 func TestPlaneStride(t *testing.T) {
+	// Every case below was measured against the device. 1666 is the important
+	// one: it is the only width here that distinguishes padding to 16 from
+	// padding to 32 or 64, and it is what caught the bug that a 32-pixel rule
+	// shears cropped scans.
 	for _, tc := range []struct{ in, want int }{
-		{1275, 1280}, // 150 dpi, confirmed against the device
-		{637, 640},   // 75 dpi
-		{1280, 1280}, // already aligned
-		{2550, 2560}, // 300 dpi
+		{1275, 1280}, // 150 dpi full bed
+		{637, 640},   // 75 dpi full bed
+		{1460, 1472}, // 300 dpi crop
+		{1666, 1680}, // 300 dpi crop; 32-rule would say 1696, 64-rule 1728
+		{2550, 2560}, // 300 dpi full bed
+		{1680, 1680}, // already aligned
 	} {
 		if got := PlaneStride(tc.in); got != tc.want {
 			t.Errorf("PlaneStride(%d) = %d, want %d", tc.in, got, tc.want)

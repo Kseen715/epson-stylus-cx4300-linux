@@ -108,10 +108,18 @@ func GammaTable() []byte {
 	return g
 }
 
+// planePad is the pixel boundary each colour plane is padded up to on the wire.
+//
+// Measured, not guessed: a 1666-pixel crop comes back with a 1680-pixel plane,
+// which is a multiple of 16 but not of 32. Widths 637, 1275, 1460 and 2550 pad
+// the same way under 16, 32 or 64, so they cannot tell those rules apart - do
+// not "simplify" this to 32 on the strength of those.
+const planePad = 16
+
 // PlaneStride returns the padded width, in pixels, of one colour plane on the
-// wire. The device pads each plane up to a multiple of 32 pixels, so a
-// 1275-pixel line is sent as 1280.
-func PlaneStride(width int) int { return (width + 31) / 32 * 32 }
+// wire. The device pads each plane up to a multiple of planePad pixels, so a
+// 1666-pixel line is sent as 1680.
+func PlaneStride(width int) int { return (width + planePad - 1) / planePad * planePad }
 
 // WireSize returns how many bytes a scan of this pixel size occupies on the
 // wire: three padded colour planes per line.

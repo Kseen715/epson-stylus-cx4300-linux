@@ -65,9 +65,11 @@ func (d *Device) drain() int {
 	}
 }
 
-func (d *Device) status() (byte, error) {
+func (d *Device) status() (byte, error) { return d.statusWithin(StatusTimeout) }
+
+func (d *Device) statusWithin(timeout time.Duration) (byte, error) {
 	buf := make([]byte, 8)
-	n, err := d.t.BulkIn(buf, StatusTimeout)
+	n, err := d.t.BulkIn(buf, timeout)
 	if err != nil {
 		return 0, fmt.Errorf("reading status frame: %w", err)
 	}
@@ -106,17 +108,23 @@ func (d *Device) command(name string, cdb []byte, send []byte, want int) ([]byte
 
 	case StatusData:
 		buf := make([]byte, 0, want)
+		short := false
 		for len(buf) < want {
 			chunk := make([]byte, min(want-len(buf), 65536))
 			n, err := d.t.BulkIn(chunk, ReadTimeout)
 			if err != nil || n == 0 {
+				short = true
 				break
 			}
 			buf = append(buf, chunk[:n]...)
 		}
-		if _, err := d.status(); err != nil {
+		// After a short read the trailing status may never arrive, so do not
+		// block on it for the full status timeout.
+		st, err := d.statusWithin(ReadTimeout)
+		if err != nil && !short {
 			return buf, fmt.Errorf("%s: %w", name, err)
 		}
+		_ = st
 		return buf, nil
 
 	case StatusDone:
@@ -152,67 +160,79 @@ func (d *Device) Identify() (DeviceInfo, error) {
 // Scan performs one scan and returns the image. The caller must not run two
 // scans concurrently against the same device; concurrent access wedges it.
 func (d *Device) Scan(p Params) (image.Image, error) {
-	if err := p.Validate(); err != nil {
+	raw, width, height, err := d.ScanRaw(p)
+	if err != nil {
 		return nil, err
 	}
-	width, height := p.Area.Pixels(p.DPI)
+	return Deinterleave(raw, width, height), nil
+}
+
+// ScanRaw performs one scan and returns the bytes exactly as the device sent
+// them, along with the pixel dimensions that were requested. The data is
+// planar and padded - see Deinterleave, which Scan applies for you. Use this
+// when you need the wire format itself, for instance to check the plane stride.
+func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
+	if err := p.Validate(); err != nil {
+		return nil, 0, 0, err
+	}
+	width, height = p.Area.Pixels(p.DPI)
 	total := WireSize(width, height)
 
 	d.drain()
 
 	// INQUIRY first: it is the cheapest way to find out the device is latched
 	// before we start moving the carriage.
-	short, err := d.command("INQUIRY", []byte{0x12, 0, 0, 0, 0x33, 0}, nil, 51)
-	if err != nil {
-		return nil, err
+	short, err2 := d.command("INQUIRY", []byte{0x12, 0, 0, 0, 0x33, 0}, nil, 51)
+	if err2 != nil {
+		return nil, 0, 0, err2
 	}
 	if len(short) == 0 {
-		return nil, ErrLatched
+		return nil, 0, 0, ErrLatched
 	}
 
 	if _, err := d.command("TEST UNIT READY", []byte{0x00, 0, 0, 0, 0, 0}, nil, 0); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	if _, err := d.command("RESERVE UNIT", []byte{0x16, 0, 0, 0, 0, 0}, nil, 0); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	defer d.command("RELEASE UNIT", []byte{0x17, 0, 0, 0, 0, 0}, nil, 0)
 
 	win := BuildSetWindow(p.DPI, p.Area)
 	setWindow := []byte{0x24, 0, 0, 0, 0, 0, 0, 0, byte(len(win)), 0}
 	if _, err := d.command("SET WINDOW", setWindow, win, 0); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	if _, err := d.command("INQUIRY(148)", []byte{0x12, 0, 0, 0, 0x94, 0}, nil, 148); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	if _, err := d.command("WRITE gamma",
 		[]byte{0x2a, 0, 0x03, 0, 0, 0x94, 0, 0x10, 0, 0}, GammaTable(), 0); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	// Calibration/shading data. The contents are all zeros in practice, but the
 	// device expects the exchange.
 	if _, err := d.command("READ calibration",
 		[]byte{0x28, 0, 0x80, 0, 0, 1, 0, 0xff, 0, 0}, nil, 0x00ff00); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	if _, err := d.command("READ calibration end",
 		[]byte{0x28, 0, 0x80, 0, 0, 1, 0, 0x00, 0, 0}, nil, 0); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 
 	if _, err := d.command("SCAN", []byte{0x1b, 0, 0, 0, 0, 0}, nil, 0); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 
-	raw := make([]byte, 0, total)
+	raw = make([]byte, 0, total)
 	for len(raw) < total {
 		want := min(ImageBlockSize, total-len(raw))
 		cdb := []byte{0x28, 0, 0, 0, 0, 0,
 			byte(want >> 16), byte(want >> 8), byte(want), 0}
 		chunk, err := d.command("READ image", cdb, nil, want)
 		if err != nil {
-			return nil, err
+			return nil, 0, 0, err
 		}
 		if len(chunk) == 0 {
 			break
@@ -221,11 +241,18 @@ func (d *Device) Scan(p Params) (image.Image, error) {
 		if d.Progress != nil {
 			d.Progress(len(raw), total)
 		}
+		if len(chunk) < want {
+			// The device had less than we asked for, so the image is complete
+			// even if our expected total said otherwise. Asking again would
+			// leave the device mid-transfer, which wedges it until mains power
+			// is cut.
+			break
+		}
 	}
 	if len(raw) == 0 {
-		return nil, errors.New("cx4300: scan returned no image data")
+		return nil, 0, 0, errors.New("cx4300: scan returned no image data")
 	}
-	return Deinterleave(raw, width, height), nil
+	return raw, width, height, nil
 }
 
 func printable(b []byte) string {

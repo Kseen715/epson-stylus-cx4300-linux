@@ -94,16 +94,32 @@ matches 51 image `READ(10)`s of 130560 bytes (6,712,875 bytes of RGB).
 
 The image does **not** arrive as interleaved RGB pixels. Each scan line is sent
 as three consecutive colour planes — the whole red row, then green, then blue —
-and each plane is padded up to a multiple of 32 pixels. At 150 dpi a 1275-pixel
-line is padded to 1280, so one line occupies `1280 * 3 = 3840` bytes and the
-padding columns must be cropped after deinterleaving.
+and each plane is padded up to a multiple of **16 pixels**. The padding columns
+must be cropped after deinterleaving.
 
 Total bytes for a full-bed 150 dpi scan are therefore `1280 * 3 * 1755 =
 6,739,200`, not `1275 * 1755 * 3`. Reading the smaller figure silently truncates
 the last few lines.
 
-(The 32-pixel padding rule is inferred from a single resolution; it may really
-be a byte-boundary rule. Worth re-checking if other resolutions look sheared.)
+Measured plane widths:
+
+| Pixel width | Plane on the wire | Scan |
+|---|---|---|
+| 637 | 640 | 75 dpi full bed |
+| 1275 | 1280 | 150 dpi full bed |
+| 1460 | 1472 | 300 dpi crop |
+| 1666 | **1680** | 300 dpi crop |
+| 2550 | 2560 | 300 dpi full bed |
+
+The 16 is load-bearing and was measured, not inferred. Every width except 1666
+pads identically under a 16-, 32- or 64-pixel rule, so those cases cannot tell
+the rules apart; 1666 can, and it pads to 1680. Assuming 32 there leaves each
+line 96 bytes short and shears the image progressively, while assuming 64 asks
+the device for more data than it has and wedges it until mains power is cut.
+
+Because the expected total depends on this, treat a `READ` that returns fewer
+bytes than requested as end-of-image and stop: issuing another `READ` leaves the
+device mid-transfer, which is one of the ways it locks up.
 
 The `READ` of `0x00ff00` = 65280 bytes before `SCAN` returns all zeros — it is
 calibration/shading data, not a parameter block, so it cannot be used to learn
