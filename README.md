@@ -1,81 +1,144 @@
-# Epson Stylus CX4300 scanner on Linux
+# Epson Stylus CX4300 scanner on Linux (and Windows)
 
-Getting the scanner half of an Epson Stylus CX4300 all-in-one (`04b8:083f`)
-working on Linux, after Epson's own `epkowa` driver turned out to be unusable
-with it.
+The scanner half of the Epson Stylus CX4300 family (`04b8:083f`, shared with the
+CX4400, CX5500, CX5600, DX4400 and DX4450) does not work with Epson's own Linux
+driver. This repository contains the reverse-engineered protocol, a Go library
+that implements it, and a small web UI to scan with.
 
-## Status
+Works on Linux (direct USB) and Windows (through WIA).
 
-* Scanner protocol fully reverse engineered — see [PROTOCOL.md](PROTOCOL.md).
-* `tools/escan.py` talks to the scanner directly and completes the whole
-  command sequence, reading a full-size image off the device.
-* **Working.** `tools/escan.py` produces a correct full-bed colour scan in
-  ~25 s (1275x1755 at 150 dpi), matching what the Windows driver produces.
+## What's here
 
-## Why not just use epkowa?
+| Path | What it is |
+|---|---|
+| `cx4300/` | the protocol as an importable Go library |
+| `cmd/escan/` | web UI: preview, crop, scan |
+| `install.sh` / `install.ps1` | installers |
+| [PROTOCOL.md](PROTOCOL.md) | the wire protocol, in detail |
+| [FINDINGS.md](FINDINGS.md) | how it was worked out, and everything ruled out |
+| `tools/escan.py` | the original Python proof of concept, kept as reference |
 
-Epson's `epkowa` backend and its `libesint7E` plugin are the officially correct
-driver for this model, and they do install and load. They still cannot scan:
-`epkowa` opens by probing with ESC/I (`1b 66`), which this device does not
-implement, and those bytes are an invalid SCSI CDB that leaves the scanner
-refusing every later command until it is power cycled.
+## Install
 
-[FINDINGS.md](FINDINGS.md) records the full diagnosis and everything ruled out.
-
-## Hardware requirements
-
-Two constraints that are easy to miss:
-
-* **No USB hub.** Attach the scanner directly to a root-hub port. Behind a hub
-  the identify step fails and the scan area comes back as `0..0mm`. Internal
-  chipset hubs (Intel rate-matching hubs, the internal hub on many USB 3
-  add-in cards) count as hubs.
-* **Nothing else may talk to it first.** One `scanimage`/`epkowa` run poisons
-  the device for the rest of the power session.
-
-If the scanner stops responding — or ignores its own power button — unplug it
-from mains for ~30 s. Re-plugging USB does not clear a firmware lockup.
-
-## Usage
+Linux:
 
 ```sh
-# nothing else must have touched the scanner since it was powered on
-sudo python3 tools/escan.py
+sudo ./install.sh
+escan                      # then open http://127.0.0.1:8080/
 ```
 
-Writes `/tmp/cx4300.pnm` (P6 PNM, 1275x1755 at 150 dpi). Requires
-`libusb-1.0` and root, or udev rules granting access to the device.
+The installer builds the binary, adds a udev rule so the `scanner` group can use
+the device without root, and **disables the `epkowa` SANE backend** — see the
+warning below. The finished binary has no runtime dependencies: no libusb, no
+Python, no SANE.
 
-Two things the driver has to get right, both easy to miss: the image arrives as
-three colour planes per line rather than interleaved pixels, and each plane is
-padded to 1280 pixels. See [PROTOCOL.md](PROTOCOL.md).
-
-## Running it from WSL2
-
-Useful on a machine that also has the Windows driver: `usbipd-win` passes the
-device into WSL, and it arrives on a virtual root hub, which satisfies the
-no-hub constraint.
+Windows:
 
 ```powershell
-usbipd list                              # find the busid
-usbipd bind --force --busid <busid>      # --force if USBPcap is installed
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+escan
+```
+
+## Two things this scanner insists on
+
+Both cost a lot of debugging time, and neither is a software bug.
+
+**Never let SANE touch it.** `epkowa` opens by probing with ESC/I (`1b 66`).
+This device does not implement ESC/I, and that probe is an invalid SCSI command
+which latches the scanner into refusing *everything* until mains power is
+removed. A single `scanimage -L` is enough. Re-plugging USB does not clear it.
+`install.sh` disables the backend for you; the library reports this state as
+`ErrLatched`.
+
+**Plug it straight into a root-hub port.** Behind any USB hub its identify step
+fails and the scan area reads back as zero. Internal hubs count — Intel
+rate-matching hubs and the internal hub on many USB 3 add-in cards included.
+
+If it stops responding, or ignores its own power button, unplug it from mains
+for ~30 seconds.
+
+## Using the library
+
+```go
+import "github.com/Kseen715/epson-stylus-cx4300-linux/cx4300"
+
+sc, err := cx4300.Open()          // usbfs on Linux, WIA on Windows
+if err != nil {
+    log.Fatal(err)
+}
+defer sc.Close()
+
+info, _ := sc.Identify()
+log.Println(info.Model, info.Firmware)
+
+// Areas are in 1/600 inch, independent of resolution.
+img, err := sc.Scan(cx4300.Params{
+    DPI:  150,
+    Area: cx4300.Area{X: 0, Y: 0, W: 2920, H: 2960},
+})
+```
+
+`cx4300.FullBed()` gives the whole platen. Supported resolutions are 75, 150,
+300 and 600 dpi; `Params.Validate` rejects anything else rather than letting the
+device fail in a confusing way.
+
+The protocol is separated from the bytes it rides on, so you can drive it over
+something other than usbfs — gousb, libusb, usbip, or a fake in tests:
+
+```go
+type Transport interface {
+    BulkOut(data []byte, timeout time.Duration) error
+    BulkIn(buf []byte, timeout time.Duration) (int, error)
+    Close() error
+}
+
+dev := cx4300.New(myTransport)
+```
+
+Exported building blocks, useful on their own: `BuildSetWindow`, `GammaTable`,
+`Deinterleave`, `PlaneStride`, `WireSize`, and the `Status*` constants.
+`go test ./cx4300` exercises the whole command sequence against a fake
+transport, so it runs without hardware.
+
+## Using the web UI
+
+```sh
+escan --addr 127.0.0.1:8080 --out ~/scans
+```
+
+**Preview** scans the whole bed at 75 dpi. Drag on it to pick an area — the
+selection is shown in millimetres and in output pixels — then **Scan
+selection** at the resolution you choose, or **Scan full bed**. Finished scans
+are written to `--out` as PNG and can be downloaded from the page.
+
+Because a browser is the front end, it works over SSH to a headless machine
+(forward the port) as well as on a desktop.
+
+## Running it from WSL
+
+`usbipd-win` hands the device to Linux, and it arrives on a virtual root hub,
+which satisfies the no-hub rule. In an Administrator PowerShell:
+
+```powershell
+usbipd list
+usbipd bind --force --busid <busid>    # --force if USBPcap is installed
 usbipd attach --wsl --busid <busid>
 ```
 
-Then in WSL, `lsusb` should show `04b8:083f` directly under a root hub.
+`lsusb` in WSL should then show `04b8:083f` directly under a root hub. To hand
+it back to Windows, `usbipd detach --busid <busid>` — and note that after a
+detach Windows usually needs the USB cable physically replugged before it will
+use the scanner again.
 
-## Re-capturing the Windows traffic
+## Status and limitations
 
-`usbipd` submits its URBs on the Windows side, so a single USBPcap session can
-record both a working Windows scan and a failing Linux one on the same port —
-which is how the protocol was worked out.
+Verified working: identify, 75 dpi preview, cropped scans at 150 and 300 dpi,
+full-bed scans. Plane padding is confirmed at 75, 150 and 300 dpi.
 
-* USBPcap only hooks root hubs when they start, so **reboot** after installing
-  it or only one `\\.\USBPcapN` filter will exist.
-* Copy `USBPcapCMD.exe` into `C:\Program Files\Wireshark\extcap\` so
-  `tshark -D` lists the filters.
-* Capture with `-A`; do **not** pass `-s` if you need full payloads (that is
-  what truncated the gamma table).
-* Scan headlessly with WIA from PowerShell — the Epson Scan GUI opens
-  off-screen on Windows 11 and is unusable. If WIA reports the device busy,
-  disable and re-enable the scanner's `MI_00` PnP node.
+Not verified: 600 dpi (it should work, but it is slow enough over this device's
+USB 1.1 link to be worth timing first), and the Windows WIA path has been
+exercised as far as backend selection and error handling but not through a
+completed scan.
+
+This is not a SANE backend, so XSane and GIMP cannot use it. Writing one around
+`cx4300/` would be a reasonable next step — the protocol work is done.

@@ -1,0 +1,123 @@
+#!/bin/sh
+# Install the CX4300 scanner tool: build the binary, grant USB access, and
+# disable the one SANE backend that bricks this scanner until it is power
+# cycled.
+#
+# Run from the repository root:   sudo ./install.sh
+set -eu
+
+BIN_DIR="${BIN_DIR:-/usr/local/bin}"
+UDEV_RULE="/etc/udev/rules.d/60-epson-cx4300.rules"
+VID=04b8
+PID=083f
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n== %s\n' "$*"; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run this with sudo (it installs a udev rule and a binary)"
+
+# The user who invoked sudo is the one who needs scanner access.
+TARGET_USER="${SUDO_USER:-}"
+[ -n "$TARGET_USER" ] || TARGET_USER="$(logname 2>/dev/null || true)"
+
+step "Detecting package manager"
+if   command -v apt-get      >/dev/null 2>&1; then PM=apt
+elif command -v xbps-install >/dev/null 2>&1; then PM=xbps
+elif command -v pacman       >/dev/null 2>&1; then PM=pacman
+elif command -v dnf          >/dev/null 2>&1; then PM=dnf
+else PM=none
+fi
+say "using: $PM"
+
+install_pkgs() {
+    case "$PM" in
+        apt)    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+        xbps)   xbps-install -Sy "$@" ;;
+        pacman) pacman -Sy --needed --noconfirm "$@" ;;
+        dnf)    dnf install -y "$@" ;;
+        none)   die "no supported package manager found; install Go manually, then re-run" ;;
+    esac
+}
+
+step "Build dependencies"
+# Go is needed only to build; the finished binary has no runtime dependencies
+# (no libusb, no Python, no SANE).
+if command -v go >/dev/null 2>&1; then
+    say "go already present: $(go version)"
+else
+    case "$PM" in
+        apt)    install_pkgs golang-go ;;
+        xbps)   install_pkgs go ;;
+        pacman) install_pkgs go ;;
+        dnf)    install_pkgs golang ;;
+    esac
+fi
+command -v go >/dev/null 2>&1 || die "Go is still not on PATH; install it and re-run"
+
+step "Building escan"
+[ -f go.mod ] || die "run this from the repository root (go.mod not found)"
+# Keep the build cache inside the tree so root does not scribble in ~/.cache.
+# -buildvcs=false: running under sudo in a repository owned by another user
+# makes git refuse to report status, which would otherwise fail the build.
+GOCACHE="${PWD}/.gocache" go build -trimpath -buildvcs=false -o "${BIN_DIR}/escan" ./cmd/escan
+say "installed ${BIN_DIR}/escan"
+
+step "USB access"
+if ! getent group scanner >/dev/null 2>&1; then
+    groupadd -r scanner
+    say "created group 'scanner'"
+fi
+cat > "$UDEV_RULE" <<RULE
+# Epson Stylus CX4300 family scanner (also CX4400/CX5500/CX5600/DX4400/DX4450).
+# Lets members of the scanner group talk to it, so escan needs no root.
+SUBSYSTEM=="usb", ATTR{idVendor}=="${VID}", ATTR{idProduct}=="${PID}", MODE="0664", GROUP="scanner"
+RULE
+say "wrote $UDEV_RULE"
+if [ -n "$TARGET_USER" ] && id "$TARGET_USER" >/dev/null 2>&1; then
+    usermod -aG scanner "$TARGET_USER"
+    say "added $TARGET_USER to the scanner group (log out and back in to pick it up)"
+fi
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --subsystem-match=usb 2>/dev/null || true
+
+step "Protecting the scanner from epkowa"
+# Any SANE probe of this device sends an ESC/I command it does not implement,
+# which latches it into refusing everything until mains power is cut. One
+# "scanimage -L" is enough, so the backend is disabled here.
+disabled_any=no
+for f in /etc/sane.d/dll.conf /etc/sane.d/dll.d/*; do
+    [ -f "$f" ] || continue
+    # Skip packaging leftovers and our own backups; editing those changes nothing.
+    case "$f" in
+        *.dpkg-*|*.rpmnew|*.rpmsave|*.bak*|*~) continue ;;
+    esac
+    if grep -qE '^[[:space:]]*epkowa[[:space:]]*$' "$f"; then
+        cp -n "$f" "${f}.bak-cx4300" 2>/dev/null || true
+        sed -i 's/^[[:space:]]*epkowa[[:space:]]*$/# epkowa disabled by cx4300 install.sh: its ESC\/I probe locks this scanner up/' "$f"
+        say "disabled epkowa in $f (backup: ${f}.bak-cx4300)"
+        disabled_any=yes
+    fi
+done
+[ "$disabled_any" = yes ] || say "epkowa was not enabled anywhere; nothing to do"
+
+step "Done"
+say "Start it with:   escan            then open http://127.0.0.1:8080/"
+say "Save scans elsewhere with:   escan --out ~/scans"
+say ""
+say "Two things this scanner insists on:"
+say "  * plug it straight into a root-hub port - behind any USB hub its identify"
+say "    step fails and the scan area reads back as zero"
+say "  * if it stops responding, or ignores its own power button, unplug it from"
+say "    mains for ~30s; re-plugging USB does not clear a firmware lockup"
+
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    say ""
+    say "This is WSL, so the scanner has to be handed over from Windows first."
+    say "In an Administrator PowerShell on the Windows side:"
+    say "    usbipd list"
+    say "    usbipd bind --force --busid <busid>"
+    say "    usbipd attach --wsl --busid <busid>"
+    say "usbip presents it on a virtual root hub, which satisfies the no-hub rule."
+fi

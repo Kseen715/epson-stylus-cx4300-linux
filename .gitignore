@@ -1,1 +1,6 @@
 *.iso
+.gocache/
+/escan
+/escan.exe
+*.pnm
+cx4300-*.png
