@@ -132,13 +132,13 @@ use the scanner again.
 
 ## Status and limitations
 
-Verified working: identify, 75 dpi preview, cropped scans at 150 and 300 dpi,
-full-bed scans. Plane padding is confirmed at 75, 150 and 300 dpi.
+Verified on both platforms against real hardware: identify, 75 dpi preview,
+cropped scans at 300 dpi and full-bed scans at 150 dpi. Linux and Windows
+produce the same framing and the same output dimensions. Plane padding is
+confirmed at 75, 150 and 300 dpi.
 
-Not verified: 600 dpi (it should work, but it is slow enough over this device's
-USB 1.1 link to be worth timing first), and the Windows WIA path has been
-exercised as far as backend selection and error handling but not through a
-completed scan.
+Not verified: 600 dpi. It should work, but a full-bed 600 dpi scan is ~107 MB
+over this device's USB 1.1 link, so time it before assuming a timeout is a bug.
 
 This is not a SANE backend, so XSane and GIMP cannot use it. Writing one around
 `cx4300/` would be a reasonable next step — the protocol work is done.
