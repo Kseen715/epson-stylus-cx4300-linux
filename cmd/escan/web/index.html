@@ -5,72 +5,195 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CX4300 Scanner</title>
 <style>
+  /* Grayscale everywhere; --accent is used only on primary action buttons.
+     Corners are square, with 45-degree chamfers cut where an edge wants
+     emphasis. No rounding, no shadows, no gradients. */
   :root {
-    --bg: #f6f6f4; --panel: #fff; --ink: #1a1a1a; --muted: #6b6b6b;
-    --line: #d9d9d4; --accent: #2f6fed; --accent-ink: #fff;
-    --warn-bg: #fff4e0; --warn-line: #e0b25e; --err-bg: #fdeaea; --err-line: #d98b8b;
+    --bg:      #eeeeee;
+    --panel:   #fafafa;
+    --sunken:  #e4e4e4;
+    --ink:     #111111;
+    --ink-2:   #444444;
+    --muted:   #767676;
+    --line:    #111111;
+    --hair:    #c4c4c4;
+    --grid:    #dcdcdc;
+    --accent:      #b3122c;
+    --accent-ink:  #ffffff;
+    --chamfer: 10px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #1b1c1e; --panel: #242629; --ink: #ececec; --muted: #9a9a9a;
-      --line: #3a3d41; --accent: #5b8cf7; --accent-ink: #0d0f12;
-      --warn-bg: #3a2f1a; --warn-line: #8a6b2a; --err-bg: #3a2020; --err-line: #8a4a4a;
+      --bg:     #0e0e0e;
+      --panel:  #181818;
+      --sunken: #0a0a0a;
+      --ink:    #ededed;
+      --ink-2:  #bdbdbd;
+      --muted:  #8a8a8a;
+      --line:   #ededed;
+      --hair:   #3a3a3a;
+      --grid:   #1d1d1d;
+      --accent:     #e01e3c;
+      --accent-ink: #0e0e0e;
     }
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  /* Must outrank #stage img { display: block }, or a src-less <img> shows the
+     browser's broken-image glyph. */
+  [hidden] { display: none !important; }
   body {
-    margin: 0; padding: 24px 16px; background: var(--bg); color: var(--ink);
-    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 28px 16px; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    /* Faint vector grid: grayscale, purely structural. */
+    background-image:
+      linear-gradient(to right, var(--grid) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+    background-size: 72px 72px, 72px 72px;
   }
-  .wrap { max-width: 1100px; margin: 0 auto; }
-  h1 { font-size: 19px; margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 20px; }
+  .wrap { max-width: 1140px; margin: 0 auto; }
+
+  .mono, code, dd, #status, .tag {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  /* Masthead with registration marks. */
+  header {
+    border: 1px solid var(--line); background: var(--panel);
+    padding: 14px 16px; margin-bottom: 16px; position: relative;
+  }
+  /* Registration mark, kept off the chamfered corners. */
+  .regmark {
+    position: absolute; top: 10px; right: 12px; width: 11px; height: 11px;
+    background:
+      linear-gradient(var(--muted), var(--muted)) center/100% 1px no-repeat,
+      linear-gradient(var(--muted), var(--muted)) center/1px 100% no-repeat;
+  }
+  h1 {
+    font-size: 13px; letter-spacing: .18em; text-transform: uppercase;
+    margin: 0 0 6px; font-weight: 700;
+  }
+  #status { color: var(--ink-2); font-size: 12px; margin: 0; word-break: break-word; }
+
   .panel {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    padding: 16px; margin-bottom: 16px;
+    background: var(--panel); border: 1px solid var(--line);
+    padding: 14px; margin-bottom: 16px;
   }
-  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-  button {
-    font: inherit; padding: 8px 14px; border-radius: 7px; border: 1px solid var(--line);
-    background: var(--panel); color: var(--ink); cursor: pointer;
+  /* 45-degree chamfer on two opposing corners, with the border continuing
+     around the diagonal. The pseudo-element sits over the square corner,
+     fills the cut-away part with the page colour and strokes the diagonal. */
+  .cut { position: relative; }
+  .cut::before, .cut::after {
+    content: ""; position: absolute; width: var(--chamfer); height: var(--chamfer);
+    pointer-events: none;
   }
-  button:hover:not(:disabled) { border-color: var(--accent); }
-  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  select { font: inherit; padding: 7px 8px; border-radius: 7px; border: 1px solid var(--line);
-           background: var(--panel); color: var(--ink); }
-  label { color: var(--muted); }
-  .grid { display: grid; grid-template-columns: 1fr 260px; gap: 16px; align-items: start; }
-  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
-  #stage { position: relative; border: 1px solid var(--line); border-radius: 8px;
-           background: var(--bg); overflow: hidden; min-height: 220px; }
+  .cut::before {
+    top: -1px; left: -1px;
+    background: linear-gradient(to bottom right,
+      var(--bg) calc(50% - .5px), var(--line) calc(50% - .5px) calc(50% + .5px),
+      var(--panel) calc(50% + .5px));
+  }
+  .cut::after {
+    bottom: -1px; right: -1px;
+    background: linear-gradient(to top left,
+      var(--bg) calc(50% - .5px), var(--line) calc(50% - .5px) calc(50% + .5px),
+      var(--panel) calc(50% + .5px));
+  }
+  .label {
+    font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px; font-weight: 700;
+  }
+
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, select, a.btn {
+    font: inherit; font-size: 13px; padding: 7px 13px; background: var(--panel);
+    color: var(--ink); border: 1px solid var(--line); cursor: pointer;
+    text-decoration: none; display: inline-block;
+  }
+  button, a.btn { position: relative; }
+  /* 45-degree corner mark; currentColor keeps it grayscale on plain buttons and
+     ink-on-accent on primary ones. */
+  button::after, a.btn::after {
+    content: ""; position: absolute; top: 0; right: 0; width: 7px; height: 7px;
+    background: linear-gradient(to bottom left, currentColor 0 50%, transparent 50%);
+    opacity: .5;
+  }
+  /* Exclude the styled variants: this rule only sets a background, so on a
+     primary or active button it would replace the accent while leaving the
+     light text in place - unreadable. */
+  button:hover:not(:disabled):not(.primary):not(.active),
+  a.btn:hover { background: var(--sunken); }
+  button.primary {
+    background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+    font-weight: 700; letter-spacing: .04em;
+  }
+  button.primary:hover:not(:disabled) {
+    background: var(--accent); color: var(--accent-ink); filter: brightness(1.18);
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  /* Drop the accent when disabled: a greyed-out red reads as an error, not as
+     an unavailable action. */
+  button.primary:disabled {
+    background: var(--panel); color: var(--muted); border-color: var(--hair);
+  }
+  /* Selected state for chrome toggles: inverted, still grayscale. */
+  button.active { background: var(--ink); color: var(--panel); border-color: var(--ink); font-weight: 700; }
+  button.active:hover:not(:disabled) { background: var(--ink); }
+  button:focus-visible, a.btn:focus-visible, select:focus-visible {
+    outline: 2px solid var(--ink); outline-offset: 2px;
+  }
+  label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+
+  .grid { display: grid; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+
+  #stage { border: 1px solid var(--line); background: var(--sunken); min-height: 220px; }
   #stage canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
   #stage img { display: block; width: 100%; height: auto; }
-  #thumb { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px;
-           margin-top: 10px; }
-  #placeholder { color: var(--muted); padding: 48px 16px; text-align: center; }
-  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; }
-  dt { color: var(--muted); }
-  dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .note, .warn, .err { padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
-  .warn { background: var(--warn-bg); border: 1px solid var(--warn-line); }
-  .err  { background: var(--err-bg);  border: 1px solid var(--err-line); white-space: pre-wrap; }
-  .bar { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; }
-  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #placeholder {
+    color: var(--muted); padding: 52px 16px; text-align: center; font-size: 11px;
+    letter-spacing: .1em; text-transform: uppercase;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  #placeholder svg { display: block; }
+
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 12px; }
+  dt { color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--ink); }
+
+  .note, .warn, .err { padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--line); font-size: 13px; }
+  /* Grayscale, distinguished by hatching rather than hue. */
+  .warn {
+    background: repeating-linear-gradient(45deg,
+      transparent 0 7px, var(--hair) 7px 8px);
+  }
+  .err { background: var(--sunken); border-left: 5px solid var(--ink); white-space: pre-wrap; }
+
+  .bar { height: 10px; background: var(--sunken); border: 1px solid var(--line); }
+  .bar > i {
+    display: block; height: 100%; width: 0; transition: width .2s;
+    background: repeating-linear-gradient(45deg,
+      var(--ink) 0 5px, var(--ink-2) 5px 10px);
+  }
+  hr { border: 0; border-top: 1px solid var(--hair); margin: 14px 0; }
   .muted { color: var(--muted); }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  a { color: var(--accent); }
+  code { font-size: 11px; color: var(--ink-2); word-break: break-all; }
+  a { color: var(--ink); }
+  #thumb { width: 100%; height: auto; border: 1px solid var(--line); margin-top: 10px; display: block; }
+  .foot { font-size: 11px; color: var(--muted); margin-top: 18px; line-height: 1.7; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Epson Stylus CX4300</h1>
-  <p class="sub" id="status">connecting…</p>
+  <header class="cut">
+    <h1>Epson Stylus CX4300 &mdash; Scanner</h1>
+    <p id="status">connecting&hellip;</p>
+  </header>
 
   <div id="warning" class="warn" hidden></div>
   <div id="error" class="err" hidden></div>
 
-  <div class="panel">
+  <div class="panel cut">
+    <p class="label">Acquire</p>
     <div class="row">
       <button id="btnPreview" class="primary">Preview</button>
       <label for="previewDpi">at</label>
@@ -79,59 +202,70 @@
       <span style="flex:1"></span>
       <label for="dpi">Scan at</label>
       <select id="dpi"></select>
-      <button id="btnScanSel" disabled>Scan selection</button>
+      <button id="btnScanSel" class="primary" disabled>Scan selection</button>
       <button id="btnScanFull">Scan full bed</button>
     </div>
-    <p class="muted" id="hint" style="margin:10px 0 0">
-      75 dpi is the lowest the scanner offers and the quickest — good for a
+    <p class="muted" id="hint" style="margin:10px 0 0;font-size:12px">
+      75 dpi is the lowest the scanner offers and the quickest &mdash; good for a
       preview, and often good enough for a real scan.
     </p>
     <div id="progressWrap" hidden style="margin-top:12px">
       <div class="bar"><i id="bar"></i></div>
-      <p class="muted" id="progressText" style="margin:6px 0 0"></p>
+      <p class="muted mono" id="progressText" style="margin:6px 0 0;font-size:11px"></p>
     </div>
   </div>
 
   <div class="grid">
-    <div class="panel" style="margin:0">
+    <div class="panel cut" style="margin:0">
       <div class="row" style="margin-bottom:10px">
-        <button id="viewPreview" class="primary" disabled>Preview</button>
+        <button id="viewPreview" disabled>Preview</button>
         <button id="viewResult" disabled>Last scan</button>
-        <span class="muted" id="viewNote"></span>
+        <span class="muted" id="viewNote" style="font-size:11px"></span>
       </div>
       <div id="stage">
-        <div id="placeholder">Take a preview, then drag on it to choose an area.</div>
+        <div id="placeholder">
+          <svg width="76" height="76" viewBox="0 0 76 76" fill="none"
+               stroke="currentColor" stroke-width="1" aria-hidden="true">
+            <!-- platen outline with chamfered corners, matching the chrome -->
+            <path d="M10 22 L22 10 H66 V54 L54 66 H10 Z"/>
+            <!-- crosshair -->
+            <path d="M38 26 V50 M26 38 H50" stroke-dasharray="3 3"/>
+            <circle cx="38" cy="38" r="7"/>
+          </svg>
+          <span>No preview yet &mdash; scan one to begin</span>
+        </div>
         <canvas id="canvas" hidden></canvas>
         <img id="resultImg" hidden alt="last scan">
       </div>
     </div>
-    <div class="panel" style="margin:0">
+
+    <div class="panel cut" style="margin:0">
+      <p class="label">Selection</p>
       <dl>
-        <dt>Selection</dt><dd id="selMm">whole bed</dd>
-        <dt>Output</dt><dd id="selPx">—</dd>
-        <dt>Position</dt><dd id="selPos">—</dd>
-        <dt>Last run</dt><dd id="lastRun">—</dd>
+        <dt>Size</dt><dd id="selMm">whole bed</dd>
+        <dt>Output</dt><dd id="selPx">&mdash;</dd>
+        <dt>Origin</dt><dd id="selPos">&mdash;</dd>
+        <dt>Last run</dt><dd id="lastRun">&mdash;</dd>
       </dl>
       <div class="row" style="margin-top:12px">
         <button id="btnClear" disabled>Clear selection</button>
       </div>
-      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
-      <div id="resultBox" class="muted">No scan yet.</div>
+      <hr>
+      <p class="label">Result</p>
+      <div id="resultBox" class="muted" style="font-size:12px">No scan yet.</div>
       <a id="thumbLink" hidden target="_blank" rel="noopener"><img id="thumb" alt="last scan"></a>
       <div class="row" style="margin-top:10px">
-        <a id="download" hidden download>Download PNG</a>
-      </div>
-      <div class="row" style="margin-top:10px">
+        <a id="download" class="btn" hidden download>Download PNG</a>
         <button id="btnReset" hidden>Reset device</button>
       </div>
     </div>
   </div>
 
-  <p class="muted" style="margin-top:18px">
-    Scans are saved to <code id="outDir">…</code>.
+  <p class="foot">
+    Scans are written to <code id="outDir">&hellip;</code>.
     This device must be plugged straight into a root-hub port, and nothing else
-    (<code>scanimage</code> in particular) may talk to it — one ESC/I probe locks it
-    up until mains power is cut.
+    (<code>scanimage</code> in particular) may talk to it &mdash; one ESC/I probe
+    locks it up until mains power is cut.
   </p>
 </div>
 <script src="app.js"></script>

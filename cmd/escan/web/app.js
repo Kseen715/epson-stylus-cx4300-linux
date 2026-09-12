@@ -78,8 +78,8 @@ function setView(name) {
   el('canvas').hidden = !isPreview;
   el('resultImg').hidden = isPreview;
   el('placeholder').hidden = !!(state.preview || state.result);
-  el('viewPreview').classList.toggle('primary', isPreview);
-  el('viewResult').classList.toggle('primary', !isPreview);
+  el('viewPreview').classList.toggle('active', isPreview);
+  el('viewResult').classList.toggle('active', !isPreview);
   el('viewNote').textContent = isPreview
     ? (state.sel ? 'drag to adjust the area' : 'drag to choose an area')
     : 'the preview and your selection are kept';
@@ -107,9 +107,28 @@ function drawStage() {
   ctx.fillRect(0, y, x, h);
   ctx.fillRect(x + w, y, c.width - x - w, h);
 
-  ctx.strokeStyle = '#2f6fed';
-  ctx.lineWidth = Math.max(2, c.width / 500);
+  const lw = Math.max(1, Math.round(c.width / 700));
+  ctx.lineWidth = lw;
+  ctx.setLineDash([]);
+  ctx.strokeStyle = '#ffffff';
   ctx.strokeRect(x, y, w, h);
+  ctx.strokeStyle = '#000000';
+  ctx.setLineDash([7, 5]);
+  ctx.strokeRect(x, y, w, h);
+  ctx.setLineDash([]);
+
+  // Corner ticks cut at 45 degrees, matching the chamfers in the chrome.
+  const t = Math.max(6, Math.round(c.width / 90));
+  ctx.lineWidth = lw * 2;
+  for (const [cx, cy, sx, sy] of [
+    [x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1],
+  ]) {
+    ctx.beginPath();
+    ctx.moveTo(cx + sx * t, cy);
+    ctx.lineTo(cx, cy + sy * t);
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+  }
 }
 
 // Selection in device units, derived from the previewed area rather than from
