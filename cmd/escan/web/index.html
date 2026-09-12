@@ -45,6 +45,9 @@
   #stage { position: relative; border: 1px solid var(--line); border-radius: 8px;
            background: var(--bg); overflow: hidden; min-height: 220px; }
   #stage canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
+  #stage img { display: block; width: 100%; height: auto; }
+  #thumb { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px;
+           margin-top: 10px; }
   #placeholder { color: var(--muted); padding: 48px 16px; text-align: center; }
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; }
   dt { color: var(--muted); }
@@ -91,7 +94,16 @@
 
   <div class="grid">
     <div class="panel" style="margin:0">
-      <div id="stage"><div id="placeholder">Take a preview, then drag on it to choose an area.</div></div>
+      <div class="row" style="margin-bottom:10px">
+        <button id="viewPreview" class="primary" disabled>Preview</button>
+        <button id="viewResult" disabled>Last scan</button>
+        <span class="muted" id="viewNote"></span>
+      </div>
+      <div id="stage">
+        <div id="placeholder">Take a preview, then drag on it to choose an area.</div>
+        <canvas id="canvas" hidden></canvas>
+        <img id="resultImg" hidden alt="last scan">
+      </div>
     </div>
     <div class="panel" style="margin:0">
       <dl>
@@ -105,6 +117,7 @@
       </div>
       <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
       <div id="resultBox" class="muted">No scan yet.</div>
+      <a id="thumbLink" hidden target="_blank" rel="noopener"><img id="thumb" alt="last scan"></a>
       <div class="row" style="margin-top:10px">
         <a id="download" hidden download>Download PNG</a>
       </div>

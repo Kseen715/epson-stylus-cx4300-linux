@@ -112,6 +112,14 @@ and in output pixels — then **Scan selection** at the scan resolution, or
 **Scan full bed**. **Preview selection** re-previews just the crop, which is
 worth doing before committing to a slow high-resolution pass.
 
+A scan never replaces the preview: the preview and the crop you drew stay put,
+so you can change the resolution or nudge the area and scan again. The result
+appears as a thumbnail in the side panel, and the **Last scan** / **Preview**
+buttons switch the main view between them.
+
+Scanning a selection is also quicker than the whole bed — the 300 dpi CD crop
+below took 30 s against 105 s for the full platen.
+
 Resolution is the only real lever on speed, because the time is dominated by
 the carriage, not the USB link. Measured on a full bed:
 

@@ -6,15 +6,15 @@ const UNIT = 600;
 const MM_PER_INCH = 25.4;
 
 const el = (id) => document.getElementById(id);
+
 const state = {
-  img: null,          // the image currently on the canvas
-  // The area that image covers, in 1/600 inch, and how many of those units one
-  // canvas pixel represents. Taken from the response headers, so the mapping
-  // stays correct however much the server shrank the picture.
-  area: { x: 0, y: 0, w: 5100, h: 7020 },
-  unitsPerPx: 8,
-  sel: null,          // {x, y, w, h} in canvas pixels
+  // The preview and the crop drawn on it. A scan never touches these, so the
+  // selection survives and can be adjusted and re-scanned.
+  preview: null,   // {img, area:{x,y,w,h}, unitsPerPx}
+  sel: null,       // {x, y, w, h} in canvas pixels
   drag: null,
+  result: null,    // {url, name, w, h}
+  view: 'preview',
   busy: false,
 };
 
@@ -68,11 +68,35 @@ async function refreshStatus() {
   }
 }
 
+// ---------- view switching ----------
+
+function setView(name) {
+  if (name === 'preview' && !state.preview) return;
+  if (name === 'result' && !state.result) return;
+  state.view = name;
+  const isPreview = name === 'preview';
+  el('canvas').hidden = !isPreview;
+  el('resultImg').hidden = isPreview;
+  el('placeholder').hidden = !!(state.preview || state.result);
+  el('viewPreview').classList.toggle('primary', isPreview);
+  el('viewResult').classList.toggle('primary', !isPreview);
+  el('viewNote').textContent = isPreview
+    ? (state.sel ? 'drag to adjust the area' : 'drag to choose an area')
+    : 'the preview and your selection are kept';
+}
+
+function refreshViewButtons() {
+  el('viewPreview').disabled = !state.preview;
+  el('viewResult').disabled = !state.result;
+}
+
+// ---------- preview canvas and crop ----------
+
 function drawStage() {
   const c = el('canvas');
-  if (!c || !state.img) return;
+  if (!state.preview) return;
   const ctx = c.getContext('2d');
-  ctx.drawImage(state.img, 0, 0);
+  ctx.drawImage(state.preview.img, 0, 0);
   if (!state.sel) return;
 
   const { x, y, w, h } = state.sel;
@@ -91,11 +115,12 @@ function drawStage() {
 // Selection in device units, derived from the previewed area rather than from
 // an assumed preview resolution.
 function selectionUnits() {
-  if (!state.sel) return null;
-  const k = state.unitsPerPx;
+  if (!state.sel || !state.preview) return null;
+  const k = state.preview.unitsPerPx;
+  const a = state.preview.area;
   return {
-    x: Math.round(state.area.x + state.sel.x * k),
-    y: Math.round(state.area.y + state.sel.y * k),
+    x: Math.round(a.x + state.sel.x * k),
+    y: Math.round(a.y + state.sel.y * k),
     w: Math.max(1, Math.round(state.sel.w * k)),
     h: Math.max(1, Math.round(state.sel.h * k)),
   };
@@ -124,7 +149,8 @@ function updateReadout() {
 }
 
 // Mouse position in canvas pixels.
-function imgPos(ev, c) {
+function canvasPos(ev) {
+  const c = el('canvas');
   const r = c.getBoundingClientRect();
   const p = ev.touches ? ev.touches[0] : ev;
   return {
@@ -133,26 +159,21 @@ function imgPos(ev, c) {
   };
 }
 
-function installCanvas(img) {
-  const stage = el('stage');
-  stage.innerHTML = '<canvas id="canvas"></canvas>';
+// Crop handlers are bound once: the canvas element is never recreated, which is
+// what keeps the selection alive across scans.
+(function bindCrop() {
   const c = el('canvas');
-  c.width = img.naturalWidth;
-  c.height = img.naturalHeight;
-  state.img = img;
-  drawStage();
-
   const start = (ev) => {
-    if (state.busy) return;
+    if (state.busy || !state.preview || state.view !== 'preview') return;
     ev.preventDefault();
-    state.drag = imgPos(ev, c);
+    state.drag = canvasPos(ev);
     state.sel = null;
     updateReadout();
   };
   const move = (ev) => {
     if (!state.drag) return;
     ev.preventDefault();
-    const p = imgPos(ev, c);
+    const p = canvasPos(ev);
     state.sel = {
       x: Math.min(state.drag.x, p.x), y: Math.min(state.drag.y, p.y),
       w: Math.abs(p.x - state.drag.x), h: Math.abs(p.y - state.drag.y),
@@ -161,20 +182,23 @@ function installCanvas(img) {
     updateReadout();
   };
   const end = () => {
+    if (!state.drag) return;
     state.drag = null;
     // A stray click is not a selection.
     if (state.sel && (state.sel.w < 4 || state.sel.h < 4)) state.sel = null;
     drawStage();
     updateReadout();
+    setView('preview');
   };
-
   c.addEventListener('mousedown', start);
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', end);
   c.addEventListener('touchstart', start, { passive: false });
   c.addEventListener('touchmove', move, { passive: false });
   c.addEventListener('touchend', end);
-}
+})();
+
+// ---------- progress ----------
 
 let pollTimer = null;
 function startPolling() {
@@ -191,6 +215,8 @@ function startPolling() {
   }, 500);
 }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ---------- scanning ----------
 
 async function requestScan(url, body, { asPreview }) {
   showError('');
@@ -214,44 +240,62 @@ async function requestScan(url, body, { asPreview }) {
     await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = objUrl; });
 
     const num = (h, d) => parseInt(r.headers.get(h), 10) || d;
-    state.area = {
-      x: num('X-Area-X', 0), y: num('X-Area-Y', 0),
-      w: num('X-Area-W', 5100), h: num('X-Area-H', 7020),
-    };
-    state.unitsPerPx = state.area.w / img.naturalWidth;
-
     const dpi = num('X-Scan-DPI', 0);
     const secs = (num('X-Elapsed-Ms', 0) / 1000).toFixed(1);
     const fw = num('X-Full-Width', img.naturalWidth);
     const fh = num('X-Full-Height', img.naturalHeight);
     el('lastRun').textContent = `${dpi} dpi · ${fw}×${fh} px · ${secs}s`;
 
-    state.sel = null;
-    installCanvas(img);
-    updateReadout();
-
     if (asPreview) {
-      el('resultBox').innerHTML = 'Preview only — nothing saved. ' +
-        'Drag on the image to choose an area.';
-      el('download').hidden = true;
+      // A new preview replaces the old one, so the stale selection goes too.
+      if (state.preview) URL.revokeObjectURL(state.preview.url);
+      state.preview = {
+        img, url: objUrl,
+        area: {
+          x: num('X-Area-X', 0), y: num('X-Area-Y', 0),
+          w: num('X-Area-W', 5100), h: num('X-Area-H', 7020),
+        },
+        unitsPerPx: num('X-Area-W', 5100) / img.naturalWidth,
+      };
+      state.sel = null;
+      const c = el('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      drawStage();
+      updateReadout();
+      refreshViewButtons();
+      setView('preview');
+      el('resultBox').innerHTML = state.result
+        ? el('resultBox').innerHTML
+        : 'Preview only — nothing saved. Drag on the image to choose an area.';
     } else {
+      // Keep the preview and its selection; show the scan alongside it.
+      if (state.result) URL.revokeObjectURL(state.result.url);
       const name = r.headers.get('X-Saved-Name');
       const path = r.headers.get('X-Saved-Path');
+      const href = name ? '/api/file/' + encodeURIComponent(name) : objUrl;
+      state.result = { url: objUrl, name, w: fw, h: fh };
+
+      el('resultImg').src = objUrl;
+      el('thumb').src = objUrl;
+      el('thumbLink').href = href;
+      el('thumbLink').hidden = false;
+
       el('resultBox').innerHTML = `Scanned <strong>${fw}×${fh}</strong> px in ${secs}s` +
         (path ? `<br><span class="muted">saved to</span><br><code>${path}</code>` : '') +
-        (fw > img.naturalWidth ? `<br><span class="muted">shown here scaled down; the saved file is full size</span>` : '');
+        (fw > img.naturalWidth
+          ? '<br><span class="muted">shown scaled down; the saved file is full size</span>'
+          : '');
+
       const dl = el('download');
-      if (name) {
-        // Serve the full-resolution file from disk rather than the shrunk copy
-        // the page is displaying.
-        dl.href = '/api/file/' + encodeURIComponent(name);
-        dl.download = name;
-        dl.hidden = false;
-      } else {
-        dl.href = objUrl;
-        dl.download = 'cx4300-scan.png';
-        dl.hidden = false;
-      }
+      dl.href = href;
+      dl.download = name || 'cx4300-scan.png';
+      dl.hidden = false;
+
+      refreshViewButtons();
+      // Stay on the preview so the selection can be adjusted and re-scanned;
+      // the result is one click away and thumbnailed in this panel.
+      setView('preview');
     }
   } catch (e) {
     showError(String(e));
@@ -261,6 +305,8 @@ async function requestScan(url, body, { asPreview }) {
     refreshStatus();
   }
 }
+
+// ---------- wiring ----------
 
 const previewDpi = () => parseInt(el('previewDpi').value, 10) || 75;
 const scanDpi = () => parseInt(el('dpi').value, 10) || 150;
@@ -284,10 +330,12 @@ el('btnScanSel').addEventListener('click', () => {
 });
 
 el('btnClear').addEventListener('click', () => {
-  state.sel = null; drawStage(); updateReadout();
+  state.sel = null; drawStage(); updateReadout(); setView('preview');
 });
 
 el('dpi').addEventListener('change', updateReadout);
+el('viewPreview').addEventListener('click', () => setView('preview'));
+el('viewResult').addEventListener('click', () => setView('result'));
 
 el('btnReset').addEventListener('click', async () => {
   setBusy(true);
@@ -298,4 +346,5 @@ el('btnReset').addEventListener('click', async () => {
   finally { setBusy(false); refreshStatus(); }
 });
 
+refreshViewButtons();
 refreshStatus();
