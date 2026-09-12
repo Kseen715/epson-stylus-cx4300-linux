@@ -17,6 +17,47 @@ Works on Linux (direct USB) and Windows (through WIA).
 | [PROTOCOL.md](PROTOCOL.md) | the wire protocol, in detail |
 | [FINDINGS.md](FINDINGS.md) | how it was worked out, and everything ruled out |
 | `tools/escan.py` | the original Python proof of concept, kept as reference |
+| `image/` | UI screenshots used below (`image/raw/` holds the uncropped originals) |
+
+## The interface
+
+The whole flow, in order: preview, drag a crop on it, then scan the selection at
+whatever resolution you want.
+
+**Nothing scanned yet.** The scanner identifies itself in the masthead, so you
+know it is reachable before starting.
+
+![Empty](image/01-empty.png)
+
+**Preview running.** Progress is reported in megabytes as the data arrives; a
+75 dpi full bed takes about 8 seconds.
+
+![Preview running](image/02-preview-running.png)
+
+**Preview.** The whole platen at 75 dpi. This is what you drag on.
+
+![Preview](image/03-preview.png)
+
+**Area selected.** Everything outside the marquee is dimmed, and the panel
+reports the selection in millimetres, the output size in pixels at the chosen
+resolution, and its origin on the glass.
+
+![Selection](image/04-selection.png)
+
+**Scan running.** The preview and the selection stay put while the scan runs, so
+the area can be adjusted and re-scanned without previewing again.
+
+![Scan running](image/05-scan-running.png)
+
+**Finished.** The result is saved to disk at full resolution and thumbnailed in
+the side panel; the preview is still there with the crop intact.
+
+![Scan done](image/06-scan-done.png)
+
+**Last scan.** Switching the view shows the result at full width. The preview is
+one click away, selection unchanged.
+
+![Last scan](image/07-last-scan.png)
 
 ## Install
 
