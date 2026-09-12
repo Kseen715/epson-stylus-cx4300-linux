@@ -96,7 +96,10 @@ dev := cx4300.New(myTransport)
 ```
 
 Exported building blocks, useful on their own: `BuildSetWindow`, `GammaTable`,
-`Deinterleave`, `PlaneStride`, `WireSize`, and the `Status*` constants.
+`Deinterleave`, `PlaneStride`, `WireSize`, and the `Status*` constants. The
+timeouts and the image block size are exported variables
+(`cx4300.StatusTimeout`, `cx4300.ImageBlockSize`, …) so they can be tuned
+without forking the package.
 `go test ./cx4300` exercises the whole command sequence against a fake
 transport, so it runs without hardware.
 
@@ -142,11 +145,23 @@ Useful flags:
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--addr` | `127.0.0.1:8080` | address to listen on |
+| `--out` | `.` | where finished scans are written |
 | `--preview-dpi` | `75` | resolution the preview selector starts on |
+| `--scan-dpi` | `300` | resolution preselected in the scan menu |
 | `--preview-max` | `900` | longest edge of the preview sent to the browser |
 | `--display-max` | `1600` | longest edge of a finished scan shown in the browser |
 
 Setting either `--preview-max` or `--display-max` to `0` disables scaling.
+
+To change the defaults themselves rather than pass flags, they are collected in
+one block at the top of [cmd/escan/main.go](cmd/escan/main.go) (`defaultAddr`,
+`defaultScanDPI` and friends). The browser-side equivalents — fallback
+resolutions, the crop marquee's colours and dash pattern, the progress poll
+interval — are in a single `CONFIG` object at the top of
+[cmd/escan/web/app.js](cmd/escan/web/app.js). The server's values win wherever
+it reports them, so `CONFIG` is only the fallback used before `/api/status`
+answers.
 
 Because a browser is the front end, it works over SSH to a headless machine
 (forward the port) as well as on a desktop.

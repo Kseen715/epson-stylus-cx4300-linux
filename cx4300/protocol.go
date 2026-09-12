@@ -8,20 +8,22 @@ import (
 	"time"
 )
 
-// Timeouts. The status read is generous because the device reports a lamp
-// warm-up time of up to 90 seconds and answers the status frame only once it is
-// ready to proceed.
-const (
-	writeTimeout  = 20 * time.Second
-	readTimeout   = 30 * time.Second
-	statusTimeout = 120 * time.Second
-	drainTimeout  = 700 * time.Millisecond
+// Tunables, deliberately variables rather than constants so they can be
+// adjusted before a scan without editing this package.
+//
+// StatusTimeout is generous because the device reports a lamp warm-up time of
+// up to 90 seconds and only answers the status frame once it is ready to
+// proceed. ImageBlockSize is the transfer length the Windows driver uses for
+// each image READ(10); keeping the same value avoids surprises on a device
+// whose firmware is clearly particular about what it is asked, so change it
+// only if you have a reason.
+var (
+	WriteTimeout   = 20 * time.Second
+	ReadTimeout    = 30 * time.Second
+	StatusTimeout  = 120 * time.Second
+	DrainTimeout   = 700 * time.Millisecond
+	ImageBlockSize = 0x01fe00
 )
-
-// imageBlock is the transfer length the Windows driver uses for each image
-// READ(10). Keeping the same value avoids surprises on a device whose firmware
-// is clearly particular about what it is asked.
-const imageBlock = 0x01fe00
 
 // ErrLatched reports the failure mode described in the package documentation:
 // the device has been fed a malformed CDB (almost always epkowa's ESC/I probe)
@@ -55,7 +57,7 @@ func (d *Device) drain() int {
 	buf := make([]byte, 65536)
 	total := 0
 	for {
-		n, err := d.t.BulkIn(buf, drainTimeout)
+		n, err := d.t.BulkIn(buf, DrainTimeout)
 		if err != nil || n == 0 {
 			return total
 		}
@@ -65,7 +67,7 @@ func (d *Device) drain() int {
 
 func (d *Device) status() (byte, error) {
 	buf := make([]byte, 8)
-	n, err := d.t.BulkIn(buf, statusTimeout)
+	n, err := d.t.BulkIn(buf, StatusTimeout)
 	if err != nil {
 		return 0, fmt.Errorf("reading status frame: %w", err)
 	}
@@ -78,7 +80,7 @@ func (d *Device) status() (byte, error) {
 // command runs one CDB. send supplies the data-out phase for commands that ask
 // for one; want is how many bytes to expect when the device offers data.
 func (d *Device) command(name string, cdb []byte, send []byte, want int) ([]byte, error) {
-	if err := d.t.BulkOut(cdb, writeTimeout); err != nil {
+	if err := d.t.BulkOut(cdb, WriteTimeout); err != nil {
 		return nil, fmt.Errorf("%s: sending CDB: %w", name, err)
 	}
 	st, err := d.status()
@@ -91,7 +93,7 @@ func (d *Device) command(name string, cdb []byte, send []byte, want int) ([]byte
 		if send == nil {
 			return nil, fmt.Errorf("%s: device asked for a data-out phase we do not have", name)
 		}
-		if err := d.t.BulkOut(send, writeTimeout); err != nil {
+		if err := d.t.BulkOut(send, WriteTimeout); err != nil {
 			return nil, fmt.Errorf("%s: sending data: %w", name, err)
 		}
 		if st, err = d.status(); err != nil {
@@ -106,7 +108,7 @@ func (d *Device) command(name string, cdb []byte, send []byte, want int) ([]byte
 		buf := make([]byte, 0, want)
 		for len(buf) < want {
 			chunk := make([]byte, min(want-len(buf), 65536))
-			n, err := d.t.BulkIn(chunk, readTimeout)
+			n, err := d.t.BulkIn(chunk, ReadTimeout)
 			if err != nil || n == 0 {
 				break
 			}
@@ -205,7 +207,7 @@ func (d *Device) Scan(p Params) (image.Image, error) {
 
 	raw := make([]byte, 0, total)
 	for len(raw) < total {
-		want := min(imageBlock, total-len(raw))
+		want := min(ImageBlockSize, total-len(raw))
 		cdb := []byte{0x28, 0, 0, 0, 0, 0,
 			byte(want >> 16), byte(want >> 8), byte(want), 0}
 		chunk, err := d.command("READ image", cdb, nil, want)

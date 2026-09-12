@@ -29,9 +29,21 @@ import (
 //go:embed web
 var webFS embed.FS
 
+// Defaults, all in one place. Each is also a command-line flag, so these are
+// the values you get with no arguments.
+const (
+	defaultAddr       = "127.0.0.1:8080"
+	defaultOutDir     = "."
+	defaultPreviewDPI = 75   // lowest the device offers, and the quickest
+	defaultScanDPI    = 300  // preselected in the scan resolution menu
+	defaultPreviewMax = 900  // longest edge of the preview sent to the browser
+	defaultDisplayMax = 1600 // longest edge of a finished scan shown in the browser
+)
+
 type server struct {
 	outDir     string
 	previewDPI int
+	scanDPI    int
 	previewMax int
 	displayMax int
 
@@ -47,13 +59,15 @@ type server struct {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "address to listen on")
-	out := flag.String("out", ".", "directory to write finished scans into")
-	previewDPI := flag.Int("preview-dpi", 75,
-		"default preview resolution; 75 is the lowest the device offers and the quickest")
-	previewMax := flag.Int("preview-max", 900,
+	addr := flag.String("addr", defaultAddr, "address to listen on")
+	out := flag.String("out", defaultOutDir, "directory to write finished scans into")
+	previewDPI := flag.Int("preview-dpi", defaultPreviewDPI,
+		"preview resolution; 75 is the lowest the device offers and the quickest")
+	scanDPI := flag.Int("scan-dpi", defaultScanDPI,
+		"resolution preselected in the scan menu")
+	previewMax := flag.Int("preview-max", defaultPreviewMax,
 		"longest edge, in pixels, of the preview sent to the browser (0 keeps full size)")
-	displayMax := flag.Int("display-max", 1600,
+	displayMax := flag.Int("display-max", defaultDisplayMax,
 		"longest edge, in pixels, of the finished scan shown in the browser; the file "+
 			"saved to disk is always full resolution (0 keeps full size)")
 	flag.Parse()
@@ -65,11 +79,18 @@ func main() {
 	s := &server{
 		outDir:     abs,
 		previewDPI: *previewDPI,
+		scanDPI:    *scanDPI,
 		previewMax: *previewMax,
 		displayMax: *displayMax,
 	}
-	if err := (cx4300.Params{DPI: s.previewDPI, Area: cx4300.FullBed()}).Validate(); err != nil {
-		log.Fatalf("--preview-dpi: %v", err)
+	// Fail at startup rather than on the first scan.
+	for _, f := range []struct {
+		name string
+		dpi  int
+	}{{"--preview-dpi", s.previewDPI}, {"--scan-dpi", s.scanDPI}} {
+		if err := (cx4300.Params{DPI: f.dpi, Area: cx4300.FullBed()}).Validate(); err != nil {
+			log.Fatalf("%s: %v", f.name, err)
+		}
 	}
 
 	sub, err := fs.Sub(webFS, "web")
@@ -130,6 +151,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"bedWidthMm":  float64(cx4300.BedWidth) / cx4300.Unit * 25.4,
 		"bedHeightMm": float64(cx4300.BedHeight) / cx4300.Unit * 25.4,
 		"previewDpi":  s.previewDPI,
+		"scanDpi":     s.scanDPI,
 		"dpiOptions":  cx4300.SupportedDPI,
 		"outDir":      s.outDir,
 		"canReset":    false,
@@ -198,7 +220,7 @@ func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 	if req.DPI == 0 {
-		req.DPI = 150
+		req.DPI = s.scanDPI
 	}
 	area := cx4300.FullBed()
 	if !req.Full {

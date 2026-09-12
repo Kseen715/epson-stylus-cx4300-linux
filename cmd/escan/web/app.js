@@ -1,9 +1,36 @@
 'use strict';
 
+// ---------------------------------------------------------------------------
+// Defaults and tunables. Everything adjustable lives here; the server's own
+// values (see --preview-dpi / --scan-dpi) win where it reports them, and these
+// are the fallbacks used before /api/status answers.
+// ---------------------------------------------------------------------------
+const CONFIG = {
+  previewDpi: 75,                     // fallback until the server reports its default
+  scanDpi: 300,                       // fallback for the scan menu
+  dpiOptions: [75, 150, 300, 600],    // fallback list; the device's real set comes from the server
+
+  progressPollMs: 500,                // how often to poll /api/progress during a scan
+  minDragPx: 4,                       // a drag shorter than this is a click, not a selection
+
+  // Crop marquee. Grayscale on purpose: the accent is reserved for buttons.
+  marquee: {
+    dimOutside: 'rgba(0,0,0,0.42)',   // shading over the unselected area
+    under: '#ffffff',                 // solid line beneath the dashes
+    over: '#000000',                  // dashed line on top
+    dash: [7, 5],
+    widthDivisor: 700,                // line width = canvas width / this
+    tickDivisor: 90,                  // corner tick length = canvas width / this
+  },
+};
+
 // The device measures the platen in 1/600 inch units regardless of resolution,
 // so selections are converted into those units before being sent.
 const UNIT = 600;
 const MM_PER_INCH = 25.4;
+// Platen size in those units (8.5 x 11.7 inch); the server confirms it in
+// /api/status and in the X-Area-* headers of every response.
+const BED = { w: 5100, h: 7020 };
 
 const el = (id) => document.getElementById(id);
 
@@ -50,9 +77,9 @@ function fillSelect(sel, values, chosen) {
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
-    const opts = s.dpiOptions || [75, 150, 300, 600];
-    fillSelect(el('previewDpi'), opts, s.previewDpi || 75);
-    fillSelect(el('dpi'), opts, 150);
+    const opts = s.dpiOptions || CONFIG.dpiOptions;
+    fillSelect(el('previewDpi'), opts, s.previewDpi || CONFIG.previewDpi);
+    fillSelect(el('dpi'), opts, s.scanDpi || CONFIG.scanDpi);
     el('outDir').textContent = s.outDir || '.';
 
     el('status').textContent = s.device
@@ -100,25 +127,26 @@ function drawStage() {
   if (!state.sel) return;
 
   const { x, y, w, h } = state.sel;
+  const M = CONFIG.marquee;
   // Dim everything outside the selection so the crop reads clearly.
-  ctx.fillStyle = 'rgba(0,0,0,0.42)';
+  ctx.fillStyle = M.dimOutside;
   ctx.fillRect(0, 0, c.width, y);
   ctx.fillRect(0, y + h, c.width, c.height - y - h);
   ctx.fillRect(0, y, x, h);
   ctx.fillRect(x + w, y, c.width - x - w, h);
 
-  const lw = Math.max(1, Math.round(c.width / 700));
+  const lw = Math.max(1, Math.round(c.width / M.widthDivisor));
   ctx.lineWidth = lw;
   ctx.setLineDash([]);
-  ctx.strokeStyle = '#ffffff';
+  ctx.strokeStyle = M.under;
   ctx.strokeRect(x, y, w, h);
-  ctx.strokeStyle = '#000000';
-  ctx.setLineDash([7, 5]);
+  ctx.strokeStyle = M.over;
+  ctx.setLineDash(M.dash);
   ctx.strokeRect(x, y, w, h);
   ctx.setLineDash([]);
 
   // Corner ticks cut at 45 degrees, matching the chamfers in the chrome.
-  const t = Math.max(6, Math.round(c.width / 90));
+  const t = Math.max(6, Math.round(c.width / M.tickDivisor));
   ctx.lineWidth = lw * 2;
   for (const [cx, cy, sx, sy] of [
     [x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1],
@@ -126,7 +154,7 @@ function drawStage() {
     ctx.beginPath();
     ctx.moveTo(cx + sx * t, cy);
     ctx.lineTo(cx, cy + sy * t);
-    ctx.strokeStyle = '#ffffff';
+    ctx.strokeStyle = M.under;
     ctx.stroke();
   }
 }
@@ -156,7 +184,7 @@ function updateReadout() {
     el('btnClear').disabled = true;
     return;
   }
-  const dpi = parseInt(el('dpi').value, 10) || 150;
+  const dpi = parseInt(el('dpi').value, 10) || CONFIG.scanDpi;
   const mm = (v) => (v / UNIT * MM_PER_INCH).toFixed(1);
   const px = (v) => Math.round(v * dpi / UNIT);
   el('selMm').textContent = `${mm(u.w)} × ${mm(u.h)} mm`;
@@ -204,7 +232,9 @@ function canvasPos(ev) {
     if (!state.drag) return;
     state.drag = null;
     // A stray click is not a selection.
-    if (state.sel && (state.sel.w < 4 || state.sel.h < 4)) state.sel = null;
+    if (state.sel && (state.sel.w < CONFIG.minDragPx || state.sel.h < CONFIG.minDragPx)) {
+      state.sel = null;
+    }
     drawStage();
     updateReadout();
     setView('preview');
@@ -231,7 +261,7 @@ function startPolling() {
         ? `${p.stage} — ${mb(p.done)} / ${mb(p.total)} MB (${(p.percent || 0).toFixed(0)}%)`
         : (p.stage || 'working…');
     } catch (e) { /* transient; the scan request carries the real error */ }
-  }, 500);
+  }, CONFIG.progressPollMs);
 }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
@@ -272,9 +302,9 @@ async function requestScan(url, body, { asPreview }) {
         img, url: objUrl,
         area: {
           x: num('X-Area-X', 0), y: num('X-Area-Y', 0),
-          w: num('X-Area-W', 5100), h: num('X-Area-H', 7020),
+          w: num('X-Area-W', BED.w), h: num('X-Area-H', BED.h),
         },
-        unitsPerPx: num('X-Area-W', 5100) / img.naturalWidth,
+        unitsPerPx: num('X-Area-W', BED.w) / img.naturalWidth,
       };
       state.sel = null;
       const c = el('canvas');
@@ -327,8 +357,8 @@ async function requestScan(url, body, { asPreview }) {
 
 // ---------- wiring ----------
 
-const previewDpi = () => parseInt(el('previewDpi').value, 10) || 75;
-const scanDpi = () => parseInt(el('dpi').value, 10) || 150;
+const previewDpi = () => parseInt(el('previewDpi').value, 10) || CONFIG.previewDpi;
+const scanDpi = () => parseInt(el('dpi').value, 10) || CONFIG.scanDpi;
 
 el('btnPreview').addEventListener('click', () =>
   requestScan('/api/preview', { dpi: previewDpi(), full: true }, { asPreview: true }));
