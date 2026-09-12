@@ -1,9 +1,9 @@
 // Command escan is a small web UI for scanning on an Epson Stylus CX4300.
 //
-// It serves a page on localhost with three actions: a low-resolution preview of
-// the whole platen, a crop rectangle dragged over that preview, and a full
-// scan of the selection. On Linux it drives the scanner directly over usbfs; on
-// Windows it goes through WIA.
+// It serves a page on localhost with three actions: a preview of the whole
+// platen, a crop rectangle dragged over that preview, and a full scan of the
+// selection. On Linux it drives the scanner directly over usbfs; on Windows it
+// goes through WIA.
 package main
 
 import (
@@ -12,12 +12,14 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,12 +29,11 @@ import (
 //go:embed web
 var webFS embed.FS
 
-// previewDPI is deliberately the lowest the device supports: a preview only has
-// to be good enough to position a crop box, and this keeps it quick.
-const previewDPI = 75
-
 type server struct {
-	outDir string
+	outDir     string
+	previewDPI int
+	previewMax int
+	displayMax int
 
 	// scanMu serialises device access. Two concurrent scans wedge this
 	// scanner, so every request that touches it holds this lock.
@@ -48,13 +49,28 @@ type server struct {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "address to listen on")
 	out := flag.String("out", ".", "directory to write finished scans into")
+	previewDPI := flag.Int("preview-dpi", 75,
+		"default preview resolution; 75 is the lowest the device offers and the quickest")
+	previewMax := flag.Int("preview-max", 900,
+		"longest edge, in pixels, of the preview sent to the browser (0 keeps full size)")
+	displayMax := flag.Int("display-max", 1600,
+		"longest edge, in pixels, of the finished scan shown in the browser; the file "+
+			"saved to disk is always full resolution (0 keeps full size)")
 	flag.Parse()
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatalf("cannot use output directory %s: %v", *out, err)
 	}
 	abs, _ := filepath.Abs(*out)
-	s := &server{outDir: abs}
+	s := &server{
+		outDir:     abs,
+		previewDPI: *previewDPI,
+		previewMax: *previewMax,
+		displayMax: *displayMax,
+	}
+	if err := (cx4300.Params{DPI: s.previewDPI, Area: cx4300.FullBed()}).Validate(); err != nil {
+		log.Fatalf("--preview-dpi: %v", err)
+	}
 
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -67,6 +83,7 @@ func main() {
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/progress", s.handleProgress)
 	mux.HandleFunc("/api/reset", s.handleReset)
+	mux.HandleFunc("/api/file/", s.handleFile)
 
 	srv := &http.Server{
 		Addr:        *addr,
@@ -112,7 +129,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"backend":     backendName,
 		"bedWidthMm":  float64(cx4300.BedWidth) / cx4300.Unit * 25.4,
 		"bedHeightMm": float64(cx4300.BedHeight) / cx4300.Unit * 25.4,
-		"previewDpi":  previewDPI,
+		"previewDpi":  s.previewDPI,
 		"dpiOptions":  cx4300.SupportedDPI,
 		"outDir":      s.outDir,
 		"canReset":    false,
@@ -159,7 +176,20 @@ type scanRequest struct {
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
-	s.run(w, cx4300.Params{DPI: previewDPI, Area: cx4300.FullBed()}, false)
+	req := scanRequest{DPI: s.previewDPI}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	if req.DPI == 0 {
+		req.DPI = s.previewDPI
+	}
+	// A preview of a chosen region is useful for checking focus before
+	// committing to a slow high-resolution pass.
+	area := cx4300.FullBed()
+	if !req.Full && req.W > 0 && req.H > 0 {
+		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
+	}
+	s.run(w, cx4300.Params{DPI: req.DPI, Area: area}, false, s.previewMax)
 }
 
 func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -174,12 +204,13 @@ func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if !req.Full {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
-	s.run(w, cx4300.Params{DPI: req.DPI, Area: area}, true)
+	s.run(w, cx4300.Params{DPI: req.DPI, Area: area}, true, s.displayMax)
 }
 
-// run performs one scan and writes the PNG to the response, saving a copy when
-// save is set.
-func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool) {
+// run performs one scan. The full-resolution image is saved to disk when save
+// is set; the copy sent to the browser is shrunk to maxEdge so the page stays
+// responsive even for a 600 dpi scan.
+func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool, maxEdge int) {
 	if !s.scanMu.TryLock() {
 		writeErr(w, http.StatusConflict, fmt.Errorf("a scan is already running"))
 		return
@@ -202,34 +233,97 @@ func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool) {
 	}
 	s.setProgress(0, 0, "scanning")
 
+	started := time.Now()
 	img, err := sc.Scan(p)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	elapsed := time.Since(started)
 
 	s.setProgress(1, 1, "encoding")
-	var savedPath string
+	full := img.Bounds()
+
+	var savedName string
 	if save {
-		savedPath = filepath.Join(s.outDir,
-			fmt.Sprintf("cx4300-%s-%ddpi.png", time.Now().Format("20060102-150405"), p.DPI))
-		if err := writePNG(savedPath, img); err != nil {
-			log.Printf("could not save %s: %v", savedPath, err)
-			savedPath = ""
+		savedName = fmt.Sprintf("cx4300-%s-%ddpi.png", started.Format("20060102-150405"), p.DPI)
+		if err := writePNG(filepath.Join(s.outDir, savedName), img); err != nil {
+			log.Printf("could not save %s: %v", savedName, err)
+			savedName = ""
 		}
 	}
 
-	b := img.Bounds()
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("X-Image-Width", fmt.Sprint(b.Dx()))
-	w.Header().Set("X-Image-Height", fmt.Sprint(b.Dy()))
-	w.Header().Set("X-Scan-DPI", fmt.Sprint(p.DPI))
-	if savedPath != "" {
-		w.Header().Set("X-Saved-Path", savedPath)
+	shown := shrink(img, maxEdge)
+	b := shown.Bounds()
+	h := w.Header()
+	h.Set("Content-Type", "image/png")
+	h.Set("X-Image-Width", fmt.Sprint(b.Dx()))
+	h.Set("X-Image-Height", fmt.Sprint(b.Dy()))
+	h.Set("X-Full-Width", fmt.Sprint(full.Dx()))
+	h.Set("X-Full-Height", fmt.Sprint(full.Dy()))
+	h.Set("X-Scan-DPI", fmt.Sprint(p.DPI))
+	h.Set("X-Elapsed-Ms", fmt.Sprint(elapsed.Milliseconds()))
+	// The area actually scanned, so the page can map a selection back to
+	// device units without knowing how much the image was shrunk.
+	h.Set("X-Area-X", fmt.Sprint(p.Area.X))
+	h.Set("X-Area-Y", fmt.Sprint(p.Area.Y))
+	h.Set("X-Area-W", fmt.Sprint(p.Area.W))
+	h.Set("X-Area-H", fmt.Sprint(p.Area.H))
+	if savedName != "" {
+		h.Set("X-Saved-Name", savedName)
+		h.Set("X-Saved-Path", filepath.Join(s.outDir, savedName))
 	}
-	if err := png.Encode(w, img); err != nil {
+	if err := png.Encode(w, shown); err != nil {
 		log.Printf("encoding response: %v", err)
 	}
+}
+
+// shrink scales img down so its longest edge is at most maxEdge, averaging the
+// source pixels that fall into each destination pixel. It returns img
+// unchanged when no scaling is needed.
+func shrink(img image.Image, maxEdge int) image.Image {
+	b := img.Bounds()
+	longest := b.Dx()
+	if b.Dy() > longest {
+		longest = b.Dy()
+	}
+	if maxEdge <= 0 || longest <= maxEdge {
+		return img
+	}
+	// Integer box filter: cheap, dependency-free and good enough for a preview.
+	factor := (longest + maxEdge - 1) / maxEdge
+	dw, dh := (b.Dx()+factor-1)/factor, (b.Dy()+factor-1)/factor
+
+	src, ok := img.(*image.RGBA)
+	if !ok {
+		tmp := image.NewRGBA(b)
+		draw.Draw(tmp, b, img, b.Min, draw.Src)
+		src = tmp
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := 0; y < dh; y++ {
+		for x := 0; x < dw; x++ {
+			var rs, gs, bs, n int
+			for sy := y * factor; sy < (y+1)*factor && sy < b.Dy(); sy++ {
+				row := src.Pix[sy*src.Stride:]
+				for sx := x * factor; sx < (x+1)*factor && sx < b.Dx(); sx++ {
+					rs += int(row[sx*4+0])
+					gs += int(row[sx*4+1])
+					bs += int(row[sx*4+2])
+					n++
+				}
+			}
+			if n == 0 {
+				continue
+			}
+			o := y*dst.Stride + x*4
+			dst.Pix[o+0] = byte(rs / n)
+			dst.Pix[o+1] = byte(gs / n)
+			dst.Pix[o+2] = byte(bs / n)
+			dst.Pix[o+3] = 0xff
+		}
+	}
+	return dst
 }
 
 func writePNG(path string, img image.Image) error {
@@ -239,6 +333,19 @@ func writePNG(path string, img image.Image) error {
 	}
 	defer f.Close()
 	return png.Encode(f, img)
+}
+
+// handleFile serves a saved scan at full resolution, so the Download link does
+// not depend on the shrunk copy the page is displaying.
+func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/file/")
+	// Only ever serve a plain file name from the output directory.
+	if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
+	http.ServeFile(w, r, filepath.Join(s.outDir, name))
 }
 
 func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {

@@ -70,13 +70,19 @@
   <div class="panel">
     <div class="row">
       <button id="btnPreview" class="primary">Preview</button>
-      <span class="muted">at <span id="previewDpi">75</span> dpi</span>
+      <label for="previewDpi">at</label>
+      <select id="previewDpi"></select>
+      <button id="btnPreviewSel" disabled title="Re-preview just the selected area">Preview selection</button>
       <span style="flex:1"></span>
-      <label for="dpi">Scan resolution</label>
+      <label for="dpi">Scan at</label>
       <select id="dpi"></select>
       <button id="btnScanSel" disabled>Scan selection</button>
       <button id="btnScanFull">Scan full bed</button>
     </div>
+    <p class="muted" id="hint" style="margin:10px 0 0">
+      75 dpi is the lowest the scanner offers and the quickest — good for a
+      preview, and often good enough for a real scan.
+    </p>
     <div id="progressWrap" hidden style="margin-top:12px">
       <div class="bar"><i id="bar"></i></div>
       <p class="muted" id="progressText" style="margin:6px 0 0"></p>
@@ -92,6 +98,7 @@
         <dt>Selection</dt><dd id="selMm">whole bed</dd>
         <dt>Output</dt><dd id="selPx">—</dd>
         <dt>Position</dt><dd id="selPos">—</dd>
+        <dt>Last run</dt><dd id="lastRun">—</dd>
       </dl>
       <div class="row" style="margin-top:12px">
         <button id="btnClear" disabled>Clear selection</button>

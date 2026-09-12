@@ -106,10 +106,39 @@ transport, so it runs without hardware.
 escan --addr 127.0.0.1:8080 --out ~/scans
 ```
 
-**Preview** scans the whole bed at 75 dpi. Drag on it to pick an area — the
-selection is shown in millimetres and in output pixels — then **Scan
-selection** at the resolution you choose, or **Scan full bed**. Finished scans
-are written to `--out` as PNG and can be downloaded from the page.
+**Preview** scans the whole bed at the resolution picked next to the button.
+Drag on the preview to choose an area — the selection is shown in millimetres
+and in output pixels — then **Scan selection** at the scan resolution, or
+**Scan full bed**. **Preview selection** re-previews just the crop, which is
+worth doing before committing to a slow high-resolution pass.
+
+Resolution is the only real lever on speed, because the time is dominated by
+the carriage, not the USB link. Measured on a full bed:
+
+| Resolution | Time | Pixels |
+|---|---|---|
+| 75 dpi | 8 s | 637 × 877 |
+| 150 dpi | 27 s | 1275 × 1755 |
+| 300 dpi | 105 s | 2550 × 3510 |
+| 600 dpi | ~7 min (extrapolated) | 5100 × 7020 |
+
+75 dpi is the lowest the device offers and is often good enough for a real
+scan, not just a preview.
+
+Finished scans are written to `--out` as PNG at full resolution. The copy sent
+to the browser is scaled down so the page stays responsive — a 600 dpi full bed
+is over 100 MB — while **Download PNG** always serves the full-resolution file
+from disk.
+
+Useful flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--preview-dpi` | `75` | resolution the preview selector starts on |
+| `--preview-max` | `900` | longest edge of the preview sent to the browser |
+| `--display-max` | `1600` | longest edge of a finished scan shown in the browser |
+
+Setting either `--preview-max` or `--display-max` to `0` disables scaling.
 
 Because a browser is the front end, it works over SSH to a headless machine
 (forward the port) as well as on a desktop.
