@@ -105,6 +105,24 @@
   }
 
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  /* Acquire controls. Two self-contained groups, each headed by its own label,
+     so a wrap can never leave a bare "at" or a stray select next to the wrong
+     button. Each group is a 2-column grid: primary action + resolution on the
+     first line, the secondary action spanning both columns underneath. */
+  .acquire { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; }
+  .act { display: grid; grid-template-columns: auto auto; gap: 8px; align-items: center;
+         justify-content: start; align-content: start; }
+  .act > .label { grid-column: 1 / -1; margin: 0; }
+  .act > .span { grid-column: 1 / -1; justify-self: start; }
+  @media (max-width: 720px) {
+    .acquire { grid-template-columns: 1fr; }
+    /* Resolution keeps its intrinsic width; the action takes the rest. */
+    .act { grid-template-columns: 1fr auto; }
+    .act > .span { justify-self: stretch; text-align: center; }
+    /* Fingers, not pointers. */
+    .act button, .act select { min-height: 44px; width: 100%; }
+  }
   button, select, a.btn {
     font: inherit; font-size: 13px; padding: 7px 13px; background: var(--panel);
     color: var(--ink); border: 1px solid var(--line); cursor: pointer;
@@ -195,16 +213,20 @@
 
   <div class="panel cut">
     <p class="label">Acquire</p>
-    <div class="row">
-      <button id="btnPreview" class="primary">Preview</button>
-      <label for="previewDpi">at</label>
-      <select id="previewDpi"></select>
-      <button id="btnPreviewSel" disabled title="Re-preview just the selected area">Preview selection</button>
-      <span style="flex:1"></span>
-      <label for="dpi">Scan at</label>
-      <select id="dpi"></select>
-      <button id="btnScanSel" class="primary" disabled>Scan selection</button>
-      <button id="btnScanFull">Scan full bed</button>
+    <div class="acquire">
+      <div class="act">
+        <label class="label" for="previewDpi">Preview at</label>
+        <button id="btnPreview" class="primary">Preview</button>
+        <select id="previewDpi"></select>
+        <button id="btnPreviewSel" class="span" disabled
+                title="Re-preview just the selected area">Preview selection</button>
+      </div>
+      <div class="act">
+        <label class="label" for="dpi">Scan at</label>
+        <button id="btnScanSel" class="primary" disabled>Scan selection</button>
+        <select id="dpi"></select>
+        <button id="btnScanFull" class="span">Scan full bed</button>
+      </div>
     </div>
     <p class="muted" id="hint" style="margin:10px 0 0;font-size:12px">
       75 dpi is the lowest the scanner offers and the quickest &mdash; good for a
