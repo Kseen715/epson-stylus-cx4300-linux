@@ -108,20 +108,21 @@
 
   /* Acquire controls. Two self-contained groups, each headed by its own label,
      so a wrap can never leave a bare "at" or a stray select next to the wrong
-     button. Each group is a 2-column grid: primary action + resolution on the
-     first line, the secondary action spanning both columns underneath. */
-  .acquire { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; }
-  .act { display: grid; grid-template-columns: auto auto; gap: 8px; align-items: center;
-         justify-content: start; align-content: start; }
-  .act > .label { grid-column: 1 / -1; margin: 0; }
-  .act > .span { grid-column: 1 / -1; justify-self: start; }
+     button. Both groups sit on one line, each sized to its own contents - they
+     never stretch, so no hole opens between them. */
+  .acquire { display: flex; flex-wrap: wrap; gap: 14px 28px; }
+  .act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  /* Full-width basis puts the heading on its own line above its controls. */
+  .act > .label { flex-basis: 100%; margin: 0; }
   @media (max-width: 720px) {
-    .acquire { grid-template-columns: 1fr; }
-    /* Resolution keeps its intrinsic width; the action takes the rest. */
-    .act { grid-template-columns: 1fr auto; }
-    .act > .span { justify-self: stretch; text-align: center; }
+    /* Narrow: one group per line, primary action beside its resolution and the
+       secondary action on its own line underneath. */
+    .acquire { display: block; }
+    .acquire > .act + .act { margin-top: 14px; }
+    .act > button { flex: 1 1 auto; }
+    .act > .span { flex-basis: 100%; }
     /* Fingers, not pointers. */
-    .act button, .act select { min-height: 44px; width: 100%; }
+    .act button, .act select { min-height: 44px; }
   }
   button, select, a.btn {
     font: inherit; font-size: 13px; padding: 7px 13px; background: var(--panel);
