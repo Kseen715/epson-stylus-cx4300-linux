@@ -4,12 +4,26 @@
 # cycled.
 #
 # Run from the repository root:   sudo ./install.sh
+# Add --service to also run it in the background from boot, as a systemd unit.
 set -eu
 
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 UDEV_RULE="/etc/udev/rules.d/60-epson-cx4300.rules"
+UNIT="/etc/systemd/system/escan.service"
 VID=04b8
 PID=083f
+
+WANT_SERVICE=no
+for arg in "$@"; do
+    case "$arg" in
+        --service) WANT_SERVICE=yes ;;
+        -h|--help)
+            printf 'usage: sudo ./install.sh [--service]\n'
+            printf '  --service  also install and enable the systemd unit\n'
+            exit 0 ;;
+        *) printf 'error: unknown option %s\n' "$arg" >&2; exit 1 ;;
+    esac
+done
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -101,6 +115,33 @@ for f in /etc/sane.d/dll.conf /etc/sane.d/dll.d/*; do
     fi
 done
 [ "$disabled_any" = yes ] || say "epkowa was not enabled anywhere; nothing to do"
+
+if [ "$WANT_SERVICE" = yes ]; then
+    step "Installing the systemd service"
+    command -v systemctl >/dev/null 2>&1 || die "--service needs systemd, which is not present here"
+    [ -n "$TARGET_USER" ] && id "$TARGET_USER" >/dev/null 2>&1 ||
+        die "--service needs to know which user to run as; run it with sudo from that user's shell"
+    HOME_DIR="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+    [ -n "$HOME_DIR" ] || die "cannot determine the home directory of $TARGET_USER"
+    OUT_DIR="${HOME_DIR}/scans"
+    # The unit is rendered from the committed example, so the file on disk and
+    # the one in examples/ never drift apart.
+    [ -f examples/systemd/escan.service ] || die "examples/systemd/escan.service not found"
+    sed -e "s/%USER%/${TARGET_USER}/g" \
+        -e "s#%OUT%#${OUT_DIR}#g" \
+        -e "s#/usr/local/bin/escan#${BIN_DIR}/escan#g" \
+        examples/systemd/escan.service > "$UNIT"
+    install -d -o "$TARGET_USER" -g "$TARGET_USER" -m 0755 "$OUT_DIR"
+    systemctl daemon-reload
+    systemctl enable --now escan
+    say "escan runs as $TARGET_USER, writing to $OUT_DIR"
+    say "  status:  systemctl status escan     logs: journalctl -u escan -f"
+    say "  stop it: sudo systemctl disable --now escan"
+else
+    say ""
+    say "To run it in the background from boot instead:  sudo ./install.sh --service"
+    say "(a per-user alternative is in examples/systemd/escan.user.service)"
+fi
 
 step "Done"
 say "Start it with:   escan            then open http://127.0.0.1:8080/"

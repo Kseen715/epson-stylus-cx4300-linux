@@ -7,10 +7,18 @@ On Windows the scanner is driven through WIA, using Epson's own driver, so
 nothing here replaces or rebinds a driver. Run from the repository root:
 
     powershell -ExecutionPolicy Bypass -File .\install.ps1
+
+Add -Service to also start it at logon as a Scheduled Task. Windows has no
+user-session service, and WIA needs the interactive session anyway, so a task
+is the right shape here.
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\cx4300')
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\cx4300'),
+    [switch]$Service,
+    [string]$TaskName = 'escan',
+    [string]$Addr = '127.0.0.1:8080',
+    [string]$OutDir = (Join-Path $env:USERPROFILE 'scans')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +68,35 @@ if ($userPath -notlike "*$InstallDir*") {
     Note 'added to your user PATH (open a new shell to pick it up)'
 } else {
     Note 'already on PATH'
+}
+
+if ($Service) {
+    Step 'Registering the logon task'
+    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+    # Built here rather than imported from examples\windows\escan-logon-task.xml
+    # so the paths are the real ones for this install; that file is the
+    # hand-editable equivalent.
+    $action  = New-ScheduledTaskAction -Execute $exe `
+                   -Argument "--addr $Addr --out `"$OutDir`"" -WorkingDirectory $InstallDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    # InteractiveToken: WIA only reaches the scanner from the logged-on session.
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+                     -LogonType Interactive -RunLevel Limited
+    # A 600 dpi full-bed scan takes minutes, so never time the task out.
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                    -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+                    -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings `
+        -Description 'Epson Stylus CX4300 scanner web UI' -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
+    Note "task '$TaskName' starts at logon, serving http://$Addr/ into $OutDir"
+    Note "  state:  Get-ScheduledTask $TaskName"
+    Note "  remove: Unregister-ScheduledTask $TaskName -Confirm:`$false"
+} else {
+    Note ''
+    Note 'To start it at logon instead:   .\install.ps1 -Service'
 }
 
 Step 'Done'

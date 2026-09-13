@@ -1,0 +1,22 @@
+# Per-user unit: escan starts when you log in and stops when you log out.
+# Use this instead of the system unit if the machine has several users and the
+# scanner should only be served for whoever is actually sitting at it.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/systemd/escan.user.service ~/.config/systemd/user/escan.service
+#   systemctl --user daemon-reload && systemctl --user enable --now escan
+#
+# Your login must already be in the scanner group (install.sh adds it) - a user
+# unit inherits your groups, it cannot request one.
+
+[Unit]
+Description=Epson Stylus CX4300 scanner web UI
+Documentation=https://github.com/Kseen715/epson-stylus-cx4300-linux
+
+[Service]
+ExecStart=/usr/local/bin/escan --addr 127.0.0.1:8080 --out %h/scans
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

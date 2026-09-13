@@ -13,7 +13,8 @@ Works on Linux (direct USB) and Windows (through WIA).
 |---|---|
 | `cx4300/` | the protocol as an importable Go library |
 | `cmd/escan/` | web UI: preview, crop, scan |
-| `install.sh` / `install.ps1` | installers |
+| `install.sh` / `install.ps1` | installers (`--service` / `-Service` also runs it in the background) |
+| `examples/` | systemd units and the Windows logon task, ready to edit by hand |
 | [PROTOCOL.md](PROTOCOL.md) | the wire protocol, in detail |
 | [FINDINGS.md](FINDINGS.md) | how it was worked out, and everything ruled out |
 | `tools/escan.py` | the original Python proof of concept, kept as reference |
@@ -78,6 +79,34 @@ Windows:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 escan
+```
+
+### Running it as a service
+
+Optional — it is a foreground program by default. Pass the flag and it keeps
+serving `http://127.0.0.1:8080/` from boot (Linux) or from logon (Windows),
+writing scans to `~/scans`:
+
+```sh
+sudo ./install.sh --service        # systemd unit, runs as the user who invoked sudo
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service
+```
+
+Windows has no user-session service, so there it is a Scheduled Task that starts
+at logon; WIA scanning needs the interactive session anyway.
+
+The unit files are in [`examples/systemd/`](examples/systemd/) — the system-wide
+`escan.service` the installer renders, and `escan.user.service` for a per-user
+one that starts and stops with your login. The Windows task definition is
+[`examples/windows/escan-logon-task.xml`](examples/windows/escan-logon-task.xml).
+
+```sh
+systemctl status escan       # is it up
+journalctl -u escan -f       # what it is doing
+sudo systemctl disable --now escan
 ```
 
 ## Two things this scanner insists on

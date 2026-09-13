@@ -1,0 +1,36 @@
+# System-wide unit: escan runs as one named user, in the scanner group, from
+# boot onwards. This is what `install.sh --service` renders and installs into
+# /etc/systemd/system/escan.service, substituting the user, home and binary path.
+#
+# Install by hand:
+#   sudo cp examples/systemd/escan.service /etc/systemd/system/escan.service
+#   sudo sed -i 's/%USER%/yourname/; s#%OUT%#/home/yourname/scans#' \
+#       /etc/systemd/system/escan.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now escan
+
+[Unit]
+Description=Epson Stylus CX4300 scanner web UI
+Documentation=https://github.com/Kseen715/epson-stylus-cx4300-linux
+After=network.target
+
+[Service]
+User=%USER%
+# The udev rule install.sh writes grants this group access to the device node;
+# without it every scan fails with a permission error.
+Group=scanner
+ExecStart=/usr/local/bin/escan --addr 127.0.0.1:8080 --out %OUT%
+Restart=on-failure
+RestartSec=5
+
+# The process needs nothing but its output directory and the USB device node.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%OUT%
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

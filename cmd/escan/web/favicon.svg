@@ -1,10 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <!-- Flatbed scanner: chamfered body in the same grey/accent pair as the app
-       chrome. Stroke colours are fixed rather than currentColor - a favicon is
-       rendered outside the page, so #8a8a8a is picked to read on both a light
-       and a dark browser tab. -->
+       chrome, with an S on the platen. Stroke colours are fixed rather than
+       currentColor - a favicon is rendered outside the page, so #8a8a8a is
+       picked to read on both a light and a dark browser tab. The S is a path,
+       not text, because a favicon cannot rely on any particular font. -->
   <path d="M2.5 9 H24 L29.5 14.5 V26.5 H8 L2.5 21 Z"
         fill="none" stroke="#8a8a8a" stroke-width="2.5"/>
-  <!-- scan light sweeping the platen -->
-  <path d="M8 18 H24" stroke="#e01e3c" stroke-width="3"/>
+  <path d="M20 14.2 C20 12.2 18.1 11.3 16 11.3 C13.9 11.3 12 12.3 12 14.3
+           C12 18 20 16.7 20 20.4 C20 22.5 18 23.7 15.9 23.7
+           C13.8 23.7 12.1 22.8 11.7 21.2"
+        fill="none" stroke="#e01e3c" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
