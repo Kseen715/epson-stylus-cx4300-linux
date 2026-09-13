@@ -1,4 +1,4 @@
-# Epson Stylus CX4300 scanner — USB wire protocol
+# Epson Stylus CX4300 scanner - USB wire protocol
 
 USB ID `04b8:083f` (shared with CX4400 / CX5500 / CX5600 / DX4400 / DX4450).
 
@@ -87,13 +87,13 @@ Layout:
 | 34 | `08` | bits per pixel |
 
 Width and height are in **1/600 inch**, independent of the resolution fields, so
-5100 x 7020 is 8.5 x 11.7 inch — at 150 dpi that is 1275 x 1755 pixels, which
+5100 x 7020 is 8.5 x 11.7 inch - at 150 dpi that is 1275 x 1755 pixels, which
 matches 51 image `READ(10)`s of 130560 bytes (6,712,875 bytes of RGB).
 
 ## Image data format
 
 The image does **not** arrive as interleaved RGB pixels. Each scan line is sent
-as three consecutive colour planes — the whole red row, then green, then blue —
+as three consecutive colour planes - the whole red row, then green, then blue -
 and each plane is padded up to a multiple of **16 pixels**. The padding columns
 must be cropped after deinterleaving.
 
@@ -121,7 +121,7 @@ Because the expected total depends on this, treat a `READ` that returns fewer
 bytes than requested as end-of-image and stop: issuing another `READ` leaves the
 device mid-transfer, which is one of the ways it locks up.
 
-The `READ` of `0x00ff00` = 65280 bytes before `SCAN` returns all zeros — it is
+The `READ` of `0x00ff00` = 65280 bytes before `SCAN` returns all zeros - it is
 calibration/shading data, not a parameter block, so it cannot be used to learn
 the line width.
 
@@ -134,7 +134,7 @@ non-free `libesint7E` interpreter plugin) opens by probing with ESC/I:
 1b 66        ESC f - "request extended status"
 ```
 
-This device never answers it — two 30-second timeouts — and, worse, the bytes
+This device never answers it - two 30-second timeouts - and, worse, the bytes
 are an invalid SCSI CDB. Once the device receives them it **latches into
 answering `fb` to every subsequent command** and stays that way until it is
 power cycled. Re-plugging the cable and re-enumerating do not clear it.

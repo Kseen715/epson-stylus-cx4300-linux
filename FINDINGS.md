@@ -8,14 +8,14 @@ Chronological record of what was tried against the Epson Stylus CX4300 scanner
 `epkowa` cannot drive this device as shipped. Its opening ESC/I probe (`1b 66`)
 is an invalid SCSI CDB that latches the scanner into refusing every further
 command until power cycled. The scanner itself is fine and speaks SCSI over
-bulk — see `PROTOCOL.md`. A direct SCSI client works.
+bulk - see `PROTOCOL.md`. A direct SCSI client works.
 
 ## Driver stack (correct, but not sufficient)
 
 Epson's official packages do install and load correctly:
 
-* `iscan_2.30.4-2` — `epkowa` SANE backend plus the non-free `libesmod` core
-* `iscan-plugin-cx4400_2.1.4-1` — the `libesint7E` interpreter for this model
+* `iscan_2.30.4-2` - `epkowa` SANE backend plus the non-free `libesmod` core
+* `iscan-plugin-cx4400_2.1.4-1` - the `libesint7E` interpreter for this model
 * `iscan-data_1.39.2-1`
 
 From `iscan-cx4400-bundle-2.30.4.x64.deb.tar.gz`, sha256
@@ -35,7 +35,7 @@ probe the device with foreign commands and wedge it.
 
 On Debian/Ubuntu the core packages need `dpkg -i --force-depends` (they ask for
 the old `libsane` name). On Ubuntu 26.04 the backend also needs
-`libxml2.so.2` — that release ships `libxml2.so.16`, and the two sonames
+`libxml2.so.2` - that release ships `libxml2.so.16`, and the two sonames
 coexist safely, so dropping an older `libxml2.so.2.9.14` into
 `/usr/lib/x86_64-linux-gnu/` and running `ldconfig` is enough.
 

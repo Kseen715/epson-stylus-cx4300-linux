@@ -177,8 +177,8 @@ function updateReadout() {
   const u = selectionUnits();
   if (!u) {
     el('selMm').textContent = 'whole bed';
-    el('selPx').textContent = '—';
-    el('selPos').textContent = '—';
+    el('selPx').textContent = '-';
+    el('selPos').textContent = '-';
     el('btnScanSel').disabled = true;
     el('btnPreviewSel').disabled = true;
     el('btnClear').disabled = true;
@@ -258,7 +258,7 @@ function startPolling() {
       el('bar').style.width = (p.percent || 0).toFixed(1) + '%';
       const mb = (v) => (v / (1024 * 1024)).toFixed(1);
       el('progressText').textContent = p.total > 0
-        ? `${p.stage} — ${mb(p.done)} / ${mb(p.total)} MB (${(p.percent || 0).toFixed(0)}%)`
+        ? `${p.stage} - ${mb(p.done)} / ${mb(p.total)} MB (${(p.percent || 0).toFixed(0)}%)`
         : (p.stage || 'working…');
     } catch (e) { /* transient; the scan request carries the real error */ }
   }, CONFIG.progressPollMs);
@@ -316,7 +316,7 @@ async function requestScan(url, body, { asPreview }) {
       setView('preview');
       el('resultBox').innerHTML = state.result
         ? el('resultBox').innerHTML
-        : 'Preview only — nothing saved. Drag on the image to choose an area.';
+        : 'Preview only - nothing saved. Drag on the image to choose an area.';
     } else {
       // Keep the preview and its selection; show the scan alongside it.
       if (state.result) URL.revokeObjectURL(state.result.url);

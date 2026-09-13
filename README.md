@@ -70,7 +70,7 @@ escan                      # then open http://127.0.0.1:8080/
 ```
 
 The installer builds the binary, adds a udev rule so the `scanner` group can use
-the device without root, and **disables the `epkowa` SANE backend** — see the
+the device without root, and **disables the `epkowa` SANE backend** - see the
 warning below. The finished binary has no runtime dependencies: no libusb, no
 Python, no SANE.
 
@@ -83,7 +83,7 @@ escan
 
 ### Running it as a service
 
-Optional — it is a foreground program by default. Pass the flag and it keeps
+Optional - it is a foreground program by default. Pass the flag and it keeps
 serving `http://127.0.0.1:8080/` from boot (Linux) or from logon (Windows),
 writing scans to `~/scans`:
 
@@ -98,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service
 Windows has no user-session service, so there it is a Scheduled Task that starts
 at logon; WIA scanning needs the interactive session anyway.
 
-The unit files are in [`examples/systemd/`](examples/systemd/) — the system-wide
+The unit files are in [`examples/systemd/`](examples/systemd/) - the system-wide
 `escan.service` the installer renders, and `escan.user.service` for a per-user
 one that starts and stops with your login. The Windows task definition is
 [`examples/windows/escan-logon-task.xml`](examples/windows/escan-logon-task.xml).
@@ -117,7 +117,7 @@ flag given explicitly wins over the file. An unknown key is refused at startup
 rather than ignored. The commented template is [`examples/escan.conf`](examples/escan.conf),
 which `install.sh --service` drops in for you at mode 0600.
 
-Because flags win, **the systemd unit passes none** — everything, the listen
+Because flags win, **the systemd unit passes none** - everything, the listen
 address included, comes from the config file, so changing a setting is an edit
 there and `systemctl restart escan`. A unit carrying `--addr` would quietly
 ignore the `addr` line in the file. `WorkingDirectory` in the unit is what `out`
@@ -131,11 +131,11 @@ out  = /home/you/scans
 
 escan has no authentication: anything that can reach the address can scan, and
 can download everything in the output directory. `127.0.0.1:8080` is the
-default for that reason — widen it only on a network you trust.
+default for that reason - widen it only on a network you trust.
 
 ### Writing scans to a Samba share
 
-Set an SMB address in the config file and escan writes there itself — no cifs
+Set an SMB address in the config file and escan writes there itself - no cifs
 mount, no `mount.cifs`, no root, and no mount unit to order the service after:
 
 ```ini
@@ -153,7 +153,7 @@ and the Download link reads the file back off the share.
 Two things worth knowing:
 
 - **The password is config-file only.** There is deliberately no
-  `--smb-password` flag — an argument is visible to every user on the machine
+  `--smb-password` flag - an argument is visible to every user on the machine
   through `/proc`. escan refuses to start if the file holding it is readable by
   anyone but its owner; `chmod 600 /etc/escan.conf`.
 - **The share is proven at startup.** A wrong address, password or share name
@@ -172,7 +172,7 @@ removed. A single `scanimage -L` is enough. Re-plugging USB does not clear it.
 `ErrLatched`.
 
 **Plug it straight into a root-hub port.** Behind any USB hub its identify step
-fails and the scan area reads back as zero. Internal hubs count — Intel
+fails and the scan area reads back as zero. Internal hubs count - Intel
 rate-matching hubs and the internal hub on many USB 3 add-in cards included.
 
 If it stops responding, or ignores its own power button, unplug it from mains
@@ -204,7 +204,7 @@ img, err := sc.Scan(cx4300.Params{
 device fail in a confusing way.
 
 The protocol is separated from the bytes it rides on, so you can drive it over
-something other than usbfs — gousb, libusb, usbip, or a fake in tests:
+something other than usbfs - gousb, libusb, usbip, or a fake in tests:
 
 ```go
 type Transport interface {
@@ -231,8 +231,8 @@ escan --addr 127.0.0.1:8080 --out ~/scans
 ```
 
 **Preview** scans the whole bed at the resolution picked next to the button.
-Drag on the preview to choose an area — the selection is shown in millimetres
-and in output pixels — then **Scan selection** at the scan resolution, or
+Drag on the preview to choose an area - the selection is shown in millimetres
+and in output pixels - then **Scan selection** at the scan resolution, or
 **Scan full bed**. **Preview selection** re-previews just the crop, which is
 worth doing before committing to a slow high-resolution pass.
 
@@ -241,7 +241,7 @@ so you can change the resolution or nudge the area and scan again. The result
 appears as a thumbnail in the side panel, and the **Last scan** / **Preview**
 buttons switch the main view between them.
 
-Scanning a selection is also quicker than the whole bed — the 300 dpi CD crop
+Scanning a selection is also quicker than the whole bed - the 300 dpi CD crop
 below took 30 s against 105 s for the full platen.
 
 Resolution is the only real lever on speed, because the time is dominated by
@@ -258,8 +258,8 @@ the carriage, not the USB link. Measured on a full bed:
 scan, not just a preview.
 
 Finished scans are written to `--out` as PNG at full resolution. The copy sent
-to the browser is scaled down so the page stays responsive — a 600 dpi full bed
-is over 100 MB — while **Download PNG** always serves the full-resolution file
+to the browser is scaled down so the page stays responsive - a 600 dpi full bed
+is over 100 MB - while **Download PNG** always serves the full-resolution file
 from disk.
 
 Useful flags:
@@ -277,9 +277,9 @@ Setting either `--preview-max` or `--display-max` to `0` disables scaling.
 
 To change the defaults themselves rather than pass flags, they are collected in
 one block at the top of [cmd/escan/main.go](cmd/escan/main.go) (`defaultAddr`,
-`defaultScanDPI` and friends). The browser-side equivalents — fallback
+`defaultScanDPI` and friends). The browser-side equivalents - fallback
 resolutions, the crop marquee's colours and dash pattern, the progress poll
-interval — are in a single `CONFIG` object at the top of
+interval - are in a single `CONFIG` object at the top of
 [cmd/escan/web/app.js](cmd/escan/web/app.js). The server's values win wherever
 it reports them, so `CONFIG` is only the fallback used before `/api/status`
 answers.
@@ -299,7 +299,7 @@ usbipd attach --wsl --busid <busid>
 ```
 
 `lsusb` in WSL should then show `04b8:083f` directly under a root hub. To hand
-it back to Windows, `usbipd detach --busid <busid>` — and note that after a
+it back to Windows, `usbipd detach --busid <busid>` - and note that after a
 detach Windows usually needs the USB cable physically replugged before it will
 use the scanner again.
 
@@ -309,11 +309,11 @@ Verified on both platforms against real hardware: identify, 75 dpi preview,
 cropped scans at 300 dpi and full-bed scans at 150 dpi. Linux and Windows
 produce the same framing and the same output dimensions. The plane padding rule
 (a multiple of 16 pixels) was measured from raw wire data at five different
-widths, including a crop width that distinguishes it from 32 and 64 — see
+widths, including a crop width that distinguishes it from 32 and 64 - see
 [PROTOCOL.md](PROTOCOL.md).
 
 Not verified: 600 dpi. It should work, but a full-bed 600 dpi scan is ~107 MB
 over this device's USB 1.1 link, so time it before assuming a timeout is a bug.
 
 This is not a SANE backend, so XSane and GIMP cannot use it. Writing one around
-`cx4300/` would be a reasonable next step — the protocol work is done.
+`cx4300/` would be a reasonable next step - the protocol work is done.
