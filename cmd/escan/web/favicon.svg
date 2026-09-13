@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Flatbed scanner: chamfered body in the same grey/accent pair as the app
+       chrome. Stroke colours are fixed rather than currentColor - a favicon is
+       rendered outside the page, so #8a8a8a is picked to read on both a light
+       and a dark browser tab. -->
+  <path d="M2.5 9 H24 L29.5 14.5 V26.5 H8 L2.5 21 Z"
+        fill="none" stroke="#8a8a8a" stroke-width="2.5"/>
+  <!-- scan light sweeping the platen -->
+  <path d="M8 18 H24" stroke="#e01e3c" stroke-width="3"/>
+</svg>

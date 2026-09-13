@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CX4300 Scanner</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
   /* Grayscale everywhere; --accent is used only on primary action buttons.
      Corners are square, with 45-degree chamfers cut where an edge wants
@@ -228,9 +229,11 @@
                stroke="currentColor" stroke-width="1" aria-hidden="true">
             <!-- platen outline with chamfered corners, matching the chrome -->
             <path d="M10 22 L22 10 H66 V54 L54 66 H10 Z"/>
-            <!-- crosshair -->
-            <path d="M38 26 V50 M26 38 H50" stroke-dasharray="3 3"/>
+            <!-- crosshair: ticks stop at the ring instead of crossing it, so the
+                 centre stays a clean target rather than a hatched blob -->
+            <path d="M38 24 V30 M38 46 V52 M24 38 H30 M46 38 H52"/>
             <circle cx="38" cy="38" r="7"/>
+            <circle cx="38" cy="38" r="1.5" fill="currentColor" stroke="none"/>
           </svg>
           <span>No preview yet &mdash; scan one to begin</span>
         </div>
