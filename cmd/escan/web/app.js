@@ -10,7 +10,7 @@ const CONFIG = {
   scanDpi: 300,                       // fallback for the scan menu
   dpiOptions: [75, 150, 300, 600],    // fallback list; the device's real set comes from the server
 
-  progressPollMs: 500,                // how often to poll /api/progress during a scan
+  reconnectMs: 2000,                  // wait before re-opening a dropped event stream
   minDragPx: 4,                       // a drag shorter than this is a click, not a selection
 
   // Crop marquee. Grayscale on purpose: the accent is reserved for buttons.
@@ -28,19 +28,23 @@ const CONFIG = {
 // so selections are converted into those units before being sent.
 const UNIT = 600;
 const MM_PER_INCH = 25.4;
-// Platen size in those units (8.5 x 11.7 inch); the server confirms it in
-// /api/status and in the X-Area-* headers of every response.
-const BED = { w: 5100, h: 7020 };
 
 const el = (id) => document.getElementById(id);
 
+// There is one scanner, so the server holds one state - what it is doing, the
+// preview, the crop and the last scan - and pushes it to every page over
+// /api/events. Nothing below decides what is true; it renders what arrives, so
+// a scan started on a phone draws its progress and its result here too. Only
+// the drag in progress is local, because it is not a fact about the scanner
+// until the finger comes off the glass.
 const state = {
-  // The preview and the crop drawn on it. A scan never touches these, so the
-  // selection survives and can be adjusted and re-scanned.
-  preview: null,   // {img, area:{x,y,w,h}, unitsPerPx}
-  sel: null,       // {x, y, w, h} in canvas pixels
+  rev: -1,
+  snap: null,
+  preview: null,       // {id, img, area, unitsPerPx}
+  loadingPreview: null,
+  resultId: null,
+  sel: null,           // {x, y, w, h} in canvas pixels, derived from snap.sel
   drag: null,
-  result: null,    // {url, name, w, h}
   view: 'preview',
   busy: false,
 };
@@ -102,7 +106,9 @@ async function refreshStatus() {
     if (s.warning) el('warning').textContent = s.warning;
     el('btnReset').hidden = !s.canReset;
     el('btnLogout').hidden = !s.auth;
-    showError(s.error || '');
+    // A device error from /api/status is worth showing, but not at the cost of
+    // wiping a scan error the shared state is carrying.
+    if (s.error) showError(s.error);
   } catch (e) {
     el('status').textContent = 'cannot reach the escan server';
   }
@@ -112,12 +118,12 @@ async function refreshStatus() {
 
 function setView(name) {
   if (name === 'preview' && !state.preview) return;
-  if (name === 'result' && !state.result) return;
+  if (name === 'result' && !state.resultId) return;
   state.view = name;
   const isPreview = name === 'preview';
   el('canvas').hidden = !isPreview;
   el('resultImg').hidden = isPreview;
-  el('placeholder').hidden = !!(state.preview || state.result);
+  el('placeholder').hidden = !!(state.preview || state.resultId);
   el('viewPreview').classList.toggle('active', isPreview);
   el('viewResult').classList.toggle('active', !isPreview);
   el('viewNote').textContent = isPreview
@@ -127,7 +133,7 @@ function setView(name) {
 
 function refreshViewButtons() {
   el('viewPreview').disabled = !state.preview;
-  el('viewResult').disabled = !state.result;
+  el('viewResult').disabled = !state.resultId;
 }
 
 // ---------- preview canvas and crop ----------
@@ -173,7 +179,8 @@ function drawStage() {
 }
 
 // Selection in device units, derived from the previewed area rather than from
-// an assumed preview resolution.
+// an assumed preview resolution. This is the form the crop is shared in, and
+// the only form that means the same thing on another screen.
 function selectionUnits() {
   if (!state.sel || !state.preview) return null;
   const k = state.preview.unitsPerPx;
@@ -184,6 +191,29 @@ function selectionUnits() {
     w: Math.max(1, Math.round(state.sel.w * k)),
     h: Math.max(1, Math.round(state.sel.h * k)),
   };
+}
+
+// The reverse: the shared crop, in canvas pixels for this screen's preview.
+function applySharedSelection() {
+  if (state.drag) return;   // a finger is on the glass here; it wins locally
+  const u = state.snap && state.snap.sel;
+  if (!u || !state.preview) { state.sel = null; return; }
+  const k = state.preview.unitsPerPx;
+  const a = state.preview.area;
+  state.sel = {
+    x: (u.x - a.x) / k, y: (u.y - a.y) / k,
+    w: u.w / k, h: u.h / k,
+  };
+}
+
+async function shareSelection() {
+  try {
+    await api('/api/selection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selectionUnits()),
+    });
+  } catch (e) { /* the stream will correct us */ }
 }
 
 function updateReadout() {
@@ -251,6 +281,9 @@ function canvasPos(ev) {
     drawStage();
     updateReadout();
     setView('preview');
+    // Only the finished rectangle is shared: the other screens want the crop,
+    // not every intermediate frame of the drag.
+    shareSelection();
   };
   c.addEventListener('mousedown', start);
   window.addEventListener('mousemove', move);
@@ -260,30 +293,123 @@ function canvasPos(ev) {
   c.addEventListener('touchend', end);
 })();
 
-// ---------- progress ----------
+// ---------- the shared state ----------
 
-let pollTimer = null;
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(async () => {
-    try {
-      const p = await (await api('/api/progress')).json();
-      el('bar').style.width = (p.percent || 0).toFixed(1) + '%';
-      const mb = (v) => (v / (1024 * 1024)).toFixed(1);
-      el('progressText').textContent = p.total > 0
-        ? `${p.stage} - ${mb(p.done)} / ${mb(p.total)} MB (${(p.percent || 0).toFixed(0)}%)`
-        : (p.stage || 'working…');
-    } catch (e) { /* transient; the scan request carries the real error */ }
-  }, CONFIG.progressPollMs);
+function setLive(live) {
+  el('conn').textContent = live ? 'live' : 'reconnecting…';
+  el('conn').classList.toggle('muted', live);
 }
-function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+function render(snap) {
+  // A late frame from a dropped stream must not undo a newer one.
+  if (snap.rev <= state.rev) return;
+  const wasBusy = state.busy;
+  state.rev = snap.rev;
+  state.snap = snap;
+
+  showError(snap.error || '');
+  syncPreview(snap);
+  syncResult(snap);
+  applySharedSelection();
+  drawStage();
+  setBusy(snap.busy);
+  updateReadout();
+  refreshViewButtons();
+
+  if (snap.busy) {
+    el('bar').style.width = (snap.percent || 0).toFixed(1) + '%';
+    const mb = (v) => (v / (1024 * 1024)).toFixed(1);
+    el('progressText').textContent = snap.total > 0
+      ? `${snap.stage} - ${mb(snap.done)} / ${mb(snap.total)} MB (${(snap.percent || 0).toFixed(0)}%)`
+      : (snap.stage || 'working…');
+  }
+  if (snap.last) {
+    const secs = (snap.last.elapsedMs / 1000).toFixed(1);
+    el('lastRun').textContent =
+      `${snap.last.dpi} dpi · ${snap.last.fullW}×${snap.last.fullH} px · ${secs}s`;
+  }
+  // The device line is worth re-reading once the scanner is free again.
+  if (wasBusy && !snap.busy) refreshStatus();
+}
+
+function syncPreview(snap) {
+  const p = snap.preview;
+  if (!p) { state.preview = null; return; }
+  if (state.preview && state.preview.id === p.id) return;
+  if (state.loadingPreview === p.id) return;
+
+  state.loadingPreview = p.id;
+  const img = new Image();
+  img.onload = () => {
+    state.loadingPreview = null;
+    // Another preview may have been taken while this one was loading.
+    const cur = state.snap && state.snap.preview;
+    if (!cur || cur.id !== p.id) { if (cur) syncPreview(state.snap); return; }
+    state.preview = {
+      id: p.id, img, area: p.area, unitsPerPx: p.area.w / img.naturalWidth,
+    };
+    const c = el('canvas');
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    applySharedSelection();
+    drawStage();
+    updateReadout();
+    refreshViewButtons();
+    setView('preview');
+  };
+  img.onerror = () => { state.loadingPreview = null; };
+  img.src = '/api/image/' + encodeURIComponent(p.id);
+}
+
+function syncResult(snap) {
+  const res = snap.result;
+  if (!res) { state.resultId = null; return; }
+  if (state.resultId === res.id) return;
+  state.resultId = res.id;
+
+  const shown = '/api/image/' + encodeURIComponent(res.id);
+  const href = res.savedName ? '/api/file/' + encodeURIComponent(res.savedName) : shown;
+  el('resultImg').src = shown;
+  el('thumb').src = shown;
+  el('thumbLink').href = href;
+  el('thumbLink').hidden = false;
+
+  const secs = (res.elapsedMs / 1000).toFixed(1);
+  el('resultBox').innerHTML = `Scanned <strong>${res.fullW}×${res.fullH}</strong> px in ${secs}s` +
+    (res.savedPath ? `<br><span class="muted">saved to</span><br><code>${res.savedPath}</code>` : '') +
+    (res.fullW > res.w
+      ? '<br><span class="muted">shown scaled down; the saved file is full size</span>'
+      : '');
+
+  const dl = el('download');
+  dl.href = href;
+  dl.download = res.savedName || 'cx4300-scan.png';
+  dl.hidden = false;
+}
+
+// The event stream is the only source of state. If it drops, the reconnect
+// brings a whole fresh snapshot with it, so nothing has to be replayed - and
+// /api/status is called on the way, which is what sends an expired session back
+// to the login page.
+function connect() {
+  const es = new EventSource('/api/events');
+  es.onopen = () => setLive(true);
+  es.onmessage = (ev) => {
+    setLive(true);
+    try { render(JSON.parse(ev.data)); } catch (e) { /* not a snapshot */ }
+  };
+  es.onerror = () => {
+    es.close();
+    setLive(false);
+    refreshStatus();
+    setTimeout(connect, CONFIG.reconnectMs);
+  };
+}
 
 // ---------- scanning ----------
 
-async function requestScan(url, body, { asPreview }) {
+async function requestScan(url, body) {
   showError('');
-  setBusy(true);
-  startPolling();
   try {
     const r = await api(url, {
       method: 'POST',
@@ -294,77 +420,11 @@ async function requestScan(url, body, { asPreview }) {
       let msg = `HTTP ${r.status}`;
       try { msg = (await r.json()).error || msg; } catch (e) {}
       showError(msg);
-      return;
     }
-    const blob = await r.blob();
-    const objUrl = URL.createObjectURL(blob);
-    const img = new Image();
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = objUrl; });
-
-    const num = (h, d) => parseInt(r.headers.get(h), 10) || d;
-    const dpi = num('X-Scan-DPI', 0);
-    const secs = (num('X-Elapsed-Ms', 0) / 1000).toFixed(1);
-    const fw = num('X-Full-Width', img.naturalWidth);
-    const fh = num('X-Full-Height', img.naturalHeight);
-    el('lastRun').textContent = `${dpi} dpi · ${fw}×${fh} px · ${secs}s`;
-
-    if (asPreview) {
-      // A new preview replaces the old one, so the stale selection goes too.
-      if (state.preview) URL.revokeObjectURL(state.preview.url);
-      state.preview = {
-        img, url: objUrl,
-        area: {
-          x: num('X-Area-X', 0), y: num('X-Area-Y', 0),
-          w: num('X-Area-W', BED.w), h: num('X-Area-H', BED.h),
-        },
-        unitsPerPx: num('X-Area-W', BED.w) / img.naturalWidth,
-      };
-      state.sel = null;
-      const c = el('canvas');
-      c.width = img.naturalWidth;
-      c.height = img.naturalHeight;
-      drawStage();
-      updateReadout();
-      refreshViewButtons();
-      setView('preview');
-      el('resultBox').innerHTML = state.result
-        ? el('resultBox').innerHTML
-        : 'Preview only - nothing saved. Drag on the image to choose an area.';
-    } else {
-      // Keep the preview and its selection; show the scan alongside it.
-      if (state.result) URL.revokeObjectURL(state.result.url);
-      const name = r.headers.get('X-Saved-Name');
-      const path = r.headers.get('X-Saved-Path');
-      const href = name ? '/api/file/' + encodeURIComponent(name) : objUrl;
-      state.result = { url: objUrl, name, w: fw, h: fh };
-
-      el('resultImg').src = objUrl;
-      el('thumb').src = objUrl;
-      el('thumbLink').href = href;
-      el('thumbLink').hidden = false;
-
-      el('resultBox').innerHTML = `Scanned <strong>${fw}×${fh}</strong> px in ${secs}s` +
-        (path ? `<br><span class="muted">saved to</span><br><code>${path}</code>` : '') +
-        (fw > img.naturalWidth
-          ? '<br><span class="muted">shown scaled down; the saved file is full size</span>'
-          : '');
-
-      const dl = el('download');
-      dl.href = href;
-      dl.download = name || 'cx4300-scan.png';
-      dl.hidden = false;
-
-      refreshViewButtons();
-      // Stay on the preview so the selection can be adjusted and re-scanned;
-      // the result is one click away and thumbnailed in this panel.
-      setView('preview');
-    }
+    // Everything else - progress, the image, any failure - arrives on the
+    // event stream, here and on every other device.
   } catch (e) {
     showError(String(e));
-  } finally {
-    stopPolling();
-    setBusy(false);
-    refreshStatus();
   }
 }
 
@@ -374,25 +434,26 @@ const previewDpi = () => parseInt(el('previewDpi').value, 10) || CONFIG.previewD
 const scanDpi = () => parseInt(el('dpi').value, 10) || CONFIG.scanDpi;
 
 el('btnPreview').addEventListener('click', () =>
-  requestScan('/api/preview', { dpi: previewDpi(), full: true }, { asPreview: true }));
+  requestScan('/api/preview', { dpi: previewDpi(), full: true }));
 
 el('btnPreviewSel').addEventListener('click', () => {
   const u = selectionUnits();
   if (!u) return;
-  requestScan('/api/preview', { dpi: previewDpi(), ...u }, { asPreview: true });
+  requestScan('/api/preview', { dpi: previewDpi(), ...u });
 });
 
 el('btnScanFull').addEventListener('click', () =>
-  requestScan('/api/scan', { dpi: scanDpi(), full: true }, { asPreview: false }));
+  requestScan('/api/scan', { dpi: scanDpi(), full: true }));
 
 el('btnScanSel').addEventListener('click', () => {
   const u = selectionUnits();
   if (!u) return;
-  requestScan('/api/scan', { dpi: scanDpi(), ...u }, { asPreview: false });
+  requestScan('/api/scan', { dpi: scanDpi(), ...u });
 });
 
 el('btnClear').addEventListener('click', () => {
   state.sel = null; drawStage(); updateReadout(); setView('preview');
+  shareSelection();
 });
 
 el('dpi').addEventListener('change', updateReadout);
@@ -415,3 +476,4 @@ el('btnLogout').addEventListener('click', async () => {
 
 refreshViewButtons();
 refreshStatus();
+connect();

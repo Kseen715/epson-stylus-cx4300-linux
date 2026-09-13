@@ -207,6 +207,9 @@
   <header class="cut">
     <h1>Epson Stylus CX4300 - Scanner</h1>
     <p id="status">connecting&hellip;</p>
+    <!-- Whether this page is receiving the shared state; every device that has
+         it open sees the same scan, progress and crop. -->
+    <p id="conn" class="mono muted" style="font-size:11px;margin:4px 0 0">connecting&hellip;</p>
     <!-- Only shown once /api/status says this server asks for a login. -->
     <button id="btnLogout" hidden style="margin-top:10px">Sign out</button>
   </header>

@@ -300,6 +300,24 @@ to the browser is scaled down so the page stays responsive - a 600 dpi full bed
 is over 100 MB - while **Download PNG** always serves the full-resolution file
 from disk.
 
+### Every device sees the same scan
+
+There is one scanner, so there is one state, and it lives on the server: what
+the scanner is doing, how far along it is, the preview, the crop drawn on it and
+the last finished scan. Every page open on that address renders that state and
+nothing else. Press **Scan** on a phone and the laptop shows the progress bar
+moving and the finished image when it lands; drag a crop on the laptop and the
+phone's marquee moves with it. The crop is shared in the scanner's own 1/600
+inch units, so it means the same rectangle on a screen of any size.
+
+The state is pushed over server-sent events at `GET /api/events`, as a whole
+snapshot each time - a page that reconnects or wakes from the background is
+correct as soon as the next message arrives, with nothing to replay.
+`GET /api/state` returns the same snapshot for a script. `POST /api/scan` and
+`POST /api/preview` answer `202` at once and report everything else, failures
+included, through that state; the image itself is fetched from
+`/api/image/{id}`, where the id changes with every new image.
+
 Useful flags:
 
 | Flag | Default | Meaning |
@@ -321,8 +339,8 @@ Setting either `--preview-max` or `--display-max` to `0` disables scaling.
 To change the defaults themselves rather than pass flags, they are collected in
 one block at the top of [cmd/escan/main.go](cmd/escan/main.go) (`defaultAddr`,
 `defaultScanDPI` and friends). The browser-side equivalents - fallback
-resolutions, the crop marquee's colours and dash pattern, the progress poll
-interval - are in a single `CONFIG` object at the top of
+resolutions, the crop marquee's colours and dash pattern, the reconnect delay
+for the event stream - are in a single `CONFIG` object at the top of
 [cmd/escan/web/app.js](cmd/escan/web/app.js). The server's values win wherever
 it reports them, so `CONFIG` is only the fallback used before `/api/status`
 answers.

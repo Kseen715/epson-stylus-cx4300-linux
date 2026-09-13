@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -52,15 +53,13 @@ type server struct {
 	displayMax int
 	authOn     bool
 
+	// hub holds the state every browser renders - progress, preview, crop and
+	// last scan - and pushes it out as it changes.
+	hub *hub
+
 	// scanMu serialises device access. Two concurrent scans wedge this
 	// scanner, so every request that touches it holds this lock.
 	scanMu sync.Mutex
-
-	progMu sync.Mutex
-	busy   bool
-	done   int
-	total  int
-	stage  string
 }
 
 func main() {
@@ -120,6 +119,7 @@ func main() {
 		log.Fatal(err)
 	}
 	s := &server{
+		hub:        newHub(),
 		out:        dest,
 		previewDPI: *previewDPI,
 		scanDPI:    *scanDPI,
@@ -157,7 +157,10 @@ func main() {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/preview", s.handlePreview)
 	mux.HandleFunc("/api/scan", s.handleScan)
-	mux.HandleFunc("/api/progress", s.handleProgress)
+	mux.HandleFunc("/api/events", s.hub.handleEvents)
+	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/selection", s.handleSelection)
+	mux.HandleFunc("/api/image/", s.handleImage)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/file/", s.handleFile)
 
@@ -184,18 +187,26 @@ func main() {
 }
 
 func (s *server) setProgress(done, total int, stage string) {
-	s.progMu.Lock()
-	s.done, s.total, s.stage = done, total, stage
-	s.progMu.Unlock()
+	s.hub.change(func() {
+		s.hub.snap.Done, s.hub.snap.Total, s.hub.snap.Stage = done, total, stage
+	})
 }
 
 func (s *server) setBusy(b bool) {
-	s.progMu.Lock()
-	s.busy = b
-	if !b {
-		s.stage = ""
-	}
-	s.progMu.Unlock()
+	s.hub.change(func() {
+		s.hub.snap.Busy = b
+		if !b {
+			s.hub.snap.Stage = ""
+			s.hub.snap.Done, s.hub.snap.Total = 0, 0
+		}
+	})
+}
+
+// fail records why a scan stopped. It reaches every browser, not just the one
+// that started it.
+func (s *server) fail(err error) {
+	log.Printf("error: %v", err)
+	s.hub.change(func() { s.hub.snap.Error = err.Error() })
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -276,7 +287,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if !req.Full && req.W > 0 && req.H > 0 {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
-	s.run(w, cx4300.Params{DPI: req.DPI, Area: area}, false, s.previewMax)
+	s.start(w, cx4300.Params{DPI: req.DPI, Area: area}, "preview", s.previewMax)
 }
 
 func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -291,39 +302,62 @@ func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if !req.Full {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
-	s.run(w, cx4300.Params{DPI: req.DPI, Area: area}, true, s.displayMax)
+	s.start(w, cx4300.Params{DPI: req.DPI, Area: area}, "scan", s.displayMax)
 }
 
-// run performs one scan. The full-resolution image is saved to disk when save
-// is set; the copy sent to the browser is shrunk to maxEdge so the page stays
-// responsive even for a 600 dpi scan.
-func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool, maxEdge int) {
+// start accepts a scan and runs it in the background. The browser that asked is
+// told only that it was accepted: the image, the progress and any error reach
+// every browser the same way, through the shared state, so a scan started on
+// one device is fully visible on the others.
+func (s *server) start(w http.ResponseWriter, p cx4300.Params, kind string, maxEdge int) {
 	if !s.scanMu.TryLock() {
 		writeErr(w, http.StatusConflict, fmt.Errorf("a scan is already running"))
 		return
 	}
-	defer s.scanMu.Unlock()
+	s.hub.change(func() {
+		s.hub.snap.Busy = true
+		s.hub.snap.Error = ""
+		s.hub.snap.Stage = "opening scanner"
+		s.hub.snap.Done, s.hub.snap.Total = 0, 0
+	})
+	go func() {
+		defer s.scanMu.Unlock()
+		defer s.setBusy(false)
+		s.run(p, kind, maxEdge)
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started"})
+}
 
-	s.setBusy(true)
-	defer s.setBusy(false)
-	s.setProgress(0, 0, "opening scanner")
-
+// run performs one scan. A scan - as opposed to a preview - is saved to disk at
+// full resolution; the copy the browsers display is shrunk to maxEdge so a page
+// on a phone is not asked to hold a 600 dpi full-bed image.
+func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 	sc, err := cx4300.Open()
 	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, err)
+		s.fail(err)
 		return
 	}
 	defer sc.Close()
 
 	if pr, ok := sc.(cx4300.ProgressReporter); ok {
-		pr.SetProgress(func(done, total int) { s.setProgress(done, total, "scanning") })
+		var last time.Time
+		pr.SetProgress(func(done, total int) {
+			// The device reports every block; browsers get a quarter-second
+			// cadence, plus the final block whatever its timing.
+			now := time.Now()
+			if done < total && now.Sub(last) < progressEvery {
+				return
+			}
+			last = now
+			s.setProgress(done, total, "scanning")
+		})
 	}
 	s.setProgress(0, 0, "scanning")
 
 	started := time.Now()
 	img, err := sc.Scan(p)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		s.fail(err)
 		return
 	}
 	elapsed := time.Since(started)
@@ -331,38 +365,70 @@ func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool, maxEdge 
 	s.setProgress(1, 1, "encoding")
 	full := img.Bounds()
 
-	var savedName string
-	if save {
+	var savedName, savedPath string
+	if kind == "scan" {
 		savedName = fmt.Sprintf("cx4300-%s-%ddpi.png", started.Format("20060102-150405"), p.DPI)
 		if err := writePNG(s.out, savedName, img); err != nil {
 			log.Printf("could not save %s: %v", savedName, err)
 			savedName = ""
+		} else {
+			savedPath = s.out.Describe() + "/" + savedName
 		}
 	}
 
 	shown := shrink(img, maxEdge)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, shown); err != nil {
+		s.fail(fmt.Errorf("encoding the image for the browser: %w", err))
+		return
+	}
 	b := shown.Bounds()
-	h := w.Header()
-	h.Set("Content-Type", "image/png")
-	h.Set("X-Image-Width", fmt.Sprint(b.Dx()))
-	h.Set("X-Image-Height", fmt.Sprint(b.Dy()))
-	h.Set("X-Full-Width", fmt.Sprint(full.Dx()))
-	h.Set("X-Full-Height", fmt.Sprint(full.Dy()))
-	h.Set("X-Scan-DPI", fmt.Sprint(p.DPI))
-	h.Set("X-Elapsed-Ms", fmt.Sprint(elapsed.Milliseconds()))
-	// The area actually scanned, so the page can map a selection back to
-	// device units without knowing how much the image was shrunk.
-	h.Set("X-Area-X", fmt.Sprint(p.Area.X))
-	h.Set("X-Area-Y", fmt.Sprint(p.Area.Y))
-	h.Set("X-Area-W", fmt.Sprint(p.Area.W))
-	h.Set("X-Area-H", fmt.Sprint(p.Area.H))
-	if savedName != "" {
-		h.Set("X-Saved-Name", savedName)
-		h.Set("X-Saved-Path", s.out.Describe()+"/"+savedName)
+	info := imageInfo{
+		W: b.Dx(), H: b.Dy(), FullW: full.Dx(), FullH: full.Dy(),
+		DPI: p.DPI, ElapsedMs: elapsed.Milliseconds(), Area: fromArea(p.Area),
+		SavedName: savedName, SavedPath: savedPath,
 	}
-	if err := png.Encode(w, shown); err != nil {
-		log.Printf("encoding response: %v", err)
+	s.hub.change(func() {
+		s.hub.publish(kind, buf.Bytes(), info)
+		if kind == "preview" {
+			// A new preview replaces the area a crop was drawn on, so the crop
+			// goes with it - on every device, not just this one.
+			s.hub.snap.Sel = nil
+		}
+	})
+}
+
+func (s *server) handleState(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.hub.state())
+}
+
+// handleImage serves the shrunk copy the pages display. An image id is minted
+// once and never reused, so the answer can be cached for good.
+func (s *server) handleImage(w http.ResponseWriter, r *http.Request) {
+	data, ok := s.hub.image(strings.TrimPrefix(r.URL.Path, "/api/image/"))
+	if !ok {
+		http.NotFound(w, r)
+		return
 	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+	_, _ = w.Write(data)
+}
+
+// handleSelection shares the crop. The page sends it in device units, which is
+// what makes it meaningful on a screen of a different size.
+func (s *server) handleSelection(w http.ResponseWriter, r *http.Request) {
+	var sel *area
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&sel); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("malformed selection"))
+		return
+	}
+	if sel != nil && (sel.W <= 0 || sel.H <= 0) {
+		sel = nil
+	}
+	s.hub.change(func() { s.hub.snap.Sel = sel })
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // shrink scales img down so its longest edge is at most maxEdge, averaging the
@@ -446,19 +512,6 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
 	http.ServeContent(w, r, name, modTime, f)
-}
-
-func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {
-	s.progMu.Lock()
-	defer s.progMu.Unlock()
-	pct := 0.0
-	if s.total > 0 {
-		pct = float64(s.done) / float64(s.total) * 100
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"busy": s.busy, "done": s.done, "total": s.total,
-		"percent": pct, "stage": s.stage,
-	})
 }
 
 func (s *server) handleReset(w http.ResponseWriter, r *http.Request) {
