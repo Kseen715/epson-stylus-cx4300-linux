@@ -17,7 +17,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -41,7 +40,7 @@ const (
 )
 
 type server struct {
-	outDir     string
+	out        store
 	previewDPI int
 	scanDPI    int
 	previewMax int
@@ -70,14 +69,37 @@ func main() {
 	displayMax := flag.Int("display-max", defaultDisplayMax,
 		"longest edge, in pixels, of the finished scan shown in the browser; the file "+
 			"saved to disk is always full resolution (0 keeps full size)")
+	configPath := flag.String("config", defaultConfigPath,
+		"settings file; ignored if it does not exist")
+	smbAddress := flag.String("smb-address", "",
+		"write scans to an SMB share instead of a local directory, as //host/share[/subdir]")
+	smbUser := flag.String("smb-user", "", "user to log in to the SMB share as")
+	smbDomain := flag.String("smb-domain", "", "domain or workgroup for the SMB login")
 	flag.Parse()
 
-	if err := os.MkdirAll(*out, 0o755); err != nil {
-		log.Fatalf("cannot use output directory %s: %v", *out, err)
+	// The file fills in whatever the command line did not, so a service can be
+	// configured entirely from /etc/escan.conf.
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
 	}
-	abs, _ := filepath.Abs(*out)
+	smbPassword := ""
+	if cfg != nil {
+		if err := cfg.apply(flag.CommandLine, explicitFlags(flag.CommandLine)); err != nil {
+			log.Fatal(err)
+		}
+		if err := cfg.checkSecret("smb-password"); err != nil {
+			log.Fatal(err)
+		}
+		smbPassword = cfg.get("smb-password")
+	}
+
+	dest, err := openStore(*smbAddress, *smbUser, smbPassword, *smbDomain, *out)
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &server{
-		outDir:     abs,
+		out:        dest,
 		previewDPI: *previewDPI,
 		scanDPI:    *scanDPI,
 		previewMax: *previewMax,
@@ -114,7 +136,7 @@ func main() {
 		// device's USB 1.1 link.
 		WriteTimeout: 0,
 	}
-	log.Printf("scans will be written to %s", abs)
+	log.Printf("scans will be written to %s", s.out.Describe())
 	log.Printf("open http://%s/", *addr)
 	log.Fatal(srv.ListenAndServe())
 }
@@ -153,7 +175,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"previewDpi":  s.previewDPI,
 		"scanDpi":     s.scanDPI,
 		"dpiOptions":  cx4300.SupportedDPI,
-		"outDir":      s.outDir,
+		"outDir":      s.out.Describe(),
 		"canReset":    false,
 	}
 	if warn := hubWarning(); warn != "" {
@@ -269,7 +291,7 @@ func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool, maxEdge 
 	var savedName string
 	if save {
 		savedName = fmt.Sprintf("cx4300-%s-%ddpi.png", started.Format("20060102-150405"), p.DPI)
-		if err := writePNG(filepath.Join(s.outDir, savedName), img); err != nil {
+		if err := writePNG(s.out, savedName, img); err != nil {
 			log.Printf("could not save %s: %v", savedName, err)
 			savedName = ""
 		}
@@ -293,7 +315,7 @@ func (s *server) run(w http.ResponseWriter, p cx4300.Params, save bool, maxEdge 
 	h.Set("X-Area-H", fmt.Sprint(p.Area.H))
 	if savedName != "" {
 		h.Set("X-Saved-Name", savedName)
-		h.Set("X-Saved-Path", filepath.Join(s.outDir, savedName))
+		h.Set("X-Saved-Path", s.out.Describe()+"/"+savedName)
 	}
 	if err := png.Encode(w, shown); err != nil {
 		log.Printf("encoding response: %v", err)
@@ -348,13 +370,18 @@ func shrink(img image.Image, maxEdge int) image.Image {
 	return dst
 }
 
-func writePNG(path string, img image.Image) error {
-	f, err := os.Create(path)
+func writePNG(st store, name string, img image.Image) error {
+	f, err := st.Create(name)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return png.Encode(f, img)
+	// Closing is what flushes the last of an SMB write, so its error matters
+	// as much as the encoder's.
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // handleFile serves a saved scan at full resolution, so the Download link does
@@ -366,8 +393,14 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	f, modTime, err := s.out.Open(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
-	http.ServeFile(w, r, filepath.Join(s.outDir, name))
+	http.ServeContent(w, r, name, modTime, f)
 }
 
 func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {

@@ -18,7 +18,12 @@ User=%USER%
 # The udev rule install.sh writes grants this group access to the device node;
 # without it every scan fails with a permission error.
 Group=scanner
-ExecStart=/usr/local/bin/escan --addr 127.0.0.1:8080 --out %OUT%
+# No flags on purpose. Every setting lives in /etc/escan.conf, and a flag given
+# here would silently win over that file - including the address, which is the
+# one people change first. WorkingDirectory is what `out` defaults to, so scans
+# still land somewhere sane if the file says nothing.
+ExecStart=/usr/local/bin/escan
+WorkingDirectory=%OUT%
 Restart=on-failure
 RestartSec=5
 

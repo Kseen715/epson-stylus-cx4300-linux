@@ -14,7 +14,10 @@ Description=Epson Stylus CX4300 scanner web UI
 Documentation=https://github.com/Kseen715/epson-stylus-cx4300-linux
 
 [Service]
-ExecStart=/usr/local/bin/escan --addr 127.0.0.1:8080 --out %h/scans
+# No flags: settings come from /etc/escan.conf, and anything passed here would
+# override that file instead of being overridden by it.
+ExecStart=/usr/local/bin/escan
+WorkingDirectory=%h/scans
 Restart=on-failure
 RestartSec=5
 

@@ -10,6 +10,7 @@ set -eu
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 UDEV_RULE="/etc/udev/rules.d/60-epson-cx4300.rules"
 UNIT="/etc/systemd/system/escan.service"
+CONF="/etc/escan.conf"
 VID=04b8
 PID=083f
 
@@ -124,6 +125,20 @@ if [ "$WANT_SERVICE" = yes ]; then
     HOME_DIR="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
     [ -n "$HOME_DIR" ] || die "cannot determine the home directory of $TARGET_USER"
     OUT_DIR="${HOME_DIR}/scans"
+    # escan reads /etc/escan.conf if it exists; drop the commented example in
+    # so an SMB share can be configured there without touching the unit. Never
+    # overwrite one that is already there - it holds a password.
+    if [ -f examples/escan.conf ] && [ ! -e "$CONF" ]; then
+        # Owned by the service user, not root: escan reads it as that user, and
+        # 0600 means nobody else can read the password it may come to hold.
+        install -o "$TARGET_USER" -g "$TARGET_USER" -m 0600 examples/escan.conf "$CONF"
+        # The settings go in the file rather than into the unit, so changing one
+        # later is an edit here and a restart, with nothing to override it.
+        printf '\naddr = 127.0.0.1:8080\nout = %s\n' "$OUT_DIR" >> "$CONF"
+        say "wrote $CONF (mode 0600; escan refuses SMB credentials from a readable file)"
+    elif [ -e "$CONF" ]; then
+        say "$CONF already exists, leaving it alone; escan takes its settings from there"
+    fi
     # The unit is rendered from the committed example, so the file on disk and
     # the one in examples/ never drift apart.
     [ -f examples/systemd/escan.service ] || die "examples/systemd/escan.service not found"

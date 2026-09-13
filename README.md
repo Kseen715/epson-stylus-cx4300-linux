@@ -109,6 +109,57 @@ journalctl -u escan -f       # what it is doing
 sudo systemctl disable --now escan
 ```
 
+### Configuration file
+
+escan reads `/etc/escan.conf` at startup if it exists (`C:\ProgramData\escan\escan.conf`
+on Windows, `--config` elsewhere). Every key is also a command-line flag, and a
+flag given explicitly wins over the file. An unknown key is refused at startup
+rather than ignored. The commented template is [`examples/escan.conf`](examples/escan.conf),
+which `install.sh --service` drops in for you at mode 0600.
+
+Because flags win, **the systemd unit passes none** — everything, the listen
+address included, comes from the config file, so changing a setting is an edit
+there and `systemctl restart escan`. A unit carrying `--addr` would quietly
+ignore the `addr` line in the file. `WorkingDirectory` in the unit is what `out`
+falls back to.
+
+```ini
+# /etc/escan.conf
+addr = 0.0.0.0:8080     # reachable from the LAN; see the warning below
+out  = /home/you/scans
+```
+
+escan has no authentication: anything that can reach the address can scan, and
+can download everything in the output directory. `127.0.0.1:8080` is the
+default for that reason — widen it only on a network you trust.
+
+### Writing scans to a Samba share
+
+Set an SMB address in the config file and escan writes there itself — no cifs
+mount, no `mount.cifs`, no root, and no mount unit to order the service after:
+
+```ini
+# /etc/escan.conf, mode 0600
+smb-address  = //nas.lan/scans/cx4300
+smb-user     = scanuser
+smb-password = secret
+smb-domain   = WORKGROUP
+```
+
+The address is `//host/share`, optionally `//host:port/share/subdir`; the
+subdirectory must already exist. `out` is ignored while `smb-address` is set,
+and the Download link reads the file back off the share.
+
+Two things worth knowing:
+
+- **The password is config-file only.** There is deliberately no
+  `--smb-password` flag — an argument is visible to every user on the machine
+  through `/proc`. escan refuses to start if the file holding it is readable by
+  anyone but its owner; `chmod 600 /etc/escan.conf`.
+- **The share is proven at startup.** A wrong address, password or share name
+  fails immediately instead of after a scan that took minutes. With
+  `Restart=on-failure` in the unit, a NAS that is still booting is retried.
+
 ## Two things this scanner insists on
 
 Both cost a lot of debugging time, and neither is a software bug.

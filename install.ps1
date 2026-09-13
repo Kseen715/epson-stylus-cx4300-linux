@@ -101,6 +101,8 @@ if ($Service) {
 
 Step 'Done'
 Note 'Start it with:   escan          then open http://127.0.0.1:8080/'
+Note 'Settings, including an SMB share to save scans to, can go in'
+Note "   $env:ProgramData\escan\escan.conf   (see examples\escan.conf)"
 Note 'Save scans elsewhere with:   escan --out $HOME\scans'
 Note ''
 Note 'If a scan fails with "device busy", another application holds the'
