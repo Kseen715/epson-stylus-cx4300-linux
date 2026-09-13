@@ -129,9 +129,47 @@ addr = 0.0.0.0:8080     # reachable from the LAN; see the warning below
 out  = /home/you/scans
 ```
 
-escan has no authentication: anything that can reach the address can scan, and
-can download everything in the output directory. `127.0.0.1:8080` is the
-default for that reason - widen it only on a network you trust.
+With no login configured, anything that can reach the address can scan and can
+download everything in the output directory. `127.0.0.1:8080` is the default for
+that reason - before widening it, set a login.
+
+### Login
+
+Set a user and a password and escan serves a login page and refuses every
+request without a valid token. Set neither and it runs open, as before.
+
+```ini
+# /etc/escan.conf, mode 0600
+auth-user     = you
+auth-password = secret
+
+# Optional:
+auth-ttl         = 15m     # life of the token every request carries
+auth-refresh-ttl = 8760h   # how long the browser stays signed in
+jwt-secret       = <64 hex characters>
+```
+
+Signing in issues two HS256 JWTs as `HttpOnly`, `SameSite=Strict` cookies: a
+short-lived access token that every request carries, and a long-lived refresh
+token that does nothing but renew it. A request arriving with an expired access
+token and a good refresh token is renewed in passing, so a leaked access token
+is worthless within the quarter hour while the browser at home stays signed in
+for a year. **Sign out** is in the page header.
+
+- **The password and the signing key are config-file only**, for the same reason
+  `smb-password` is: an argument is visible to every user on the machine through
+  `/proc`. escan refuses to start if the file holding either is readable by
+  anyone else.
+- **`jwt-secret` is optional.** Left unset, escan generates one at startup,
+  which signs everyone out on every restart. Set it - `openssl rand -hex 32` -
+  to keep logins across restarts.
+- **Scripts can use it too.** `POST /api/login` with
+  `{"user":..., "password":...}` returns both tokens as JSON; send the access
+  token as `Authorization: Bearer`, and trade the refresh token for a new pair
+  at `POST /api/refresh` when it expires.
+- **This is not a substitute for TLS.** The cookies are not `Secure`, because
+  escan is normally reached over plain HTTP on a LAN. Put it behind a reverse
+  proxy with a certificate if it crosses anything less trusted than that.
 
 ### Writing scans to a Samba share
 
@@ -272,8 +310,13 @@ Useful flags:
 | `--scan-dpi` | `300` | resolution preselected in the scan menu |
 | `--preview-max` | `900` | longest edge of the preview sent to the browser |
 | `--display-max` | `1600` | longest edge of a finished scan shown in the browser |
+| `--auth-user` | none | user name for the login page; needs `auth-password` in the config file |
+| `--auth-ttl` | `15m` | life of the token every request carries |
+| `--auth-refresh-ttl` | `8760h` | how long a browser stays signed in |
 
 Setting either `--preview-max` or `--display-max` to `0` disables scaling.
+`auth-password` and `jwt-secret` have no flags on purpose - see
+[Login](#login).
 
 To change the defaults themselves rather than pass flags, they are collected in
 one block at the top of [cmd/escan/main.go](cmd/escan/main.go) (`defaultAddr`,

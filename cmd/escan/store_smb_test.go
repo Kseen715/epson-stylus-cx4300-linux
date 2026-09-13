@@ -12,6 +12,45 @@ import (
 	"time"
 )
 
+// A name reaches the stores straight from a URL, and both build a path out of
+// it - the local one with /, the SMB one with \. Anything that is not a plain
+// file name has to be refused before either does.
+func TestValidName(t *testing.T) {
+	for _, name := range []string{
+		"cx4300-20260913-000658-300dpi.png", "a", "a.b_c-d", "A1.PNG",
+	} {
+		if !validName(name) {
+			t.Errorf("%q should be accepted", name)
+		}
+	}
+	for _, name := range []string{
+		"", ".", "..", "../etc/passwd", "..\\..\\secret.png", `dir\file.png`,
+		"dir/file.png", "/etc/passwd", ".hidden", "file\x00.png", "a b.png",
+		"scan:stream.png", "%2e%2e/x", "ünïcode.png",
+	} {
+		if validName(name) {
+			t.Errorf("%q should be refused", name)
+		}
+	}
+}
+
+// The local store joins the name onto its directory, so it must refuse the same
+// names even if a caller forgets to check.
+func TestLocalStoreRefusesTraversal(t *testing.T) {
+	st, err := newLocalStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"../escaped.png", `..\escaped.png`, "sub/escaped.png"} {
+		if _, err := st.Create(name); err == nil {
+			t.Errorf("Create(%q) should have been refused", name)
+		}
+		if _, _, err := st.Open(name); err == nil {
+			t.Errorf("Open(%q) should have been refused", name)
+		}
+	}
+}
+
 // TestSMBStoreRoundTrip talks to a real server, so it only runs when one is
 // named. Against a throwaway Samba container:
 //

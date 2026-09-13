@@ -10,10 +10,19 @@ import (
 	"strings"
 )
 
-// configOnlyKeys are settings that exist in the file but deliberately have no
-// command-line flag: a password passed as an argument is readable by every
-// user on the machine through /proc.
-var configOnlyKeys = map[string]bool{"smb-password": true}
+// secretKeys are settings that exist in the file but deliberately have no
+// command-line flag: a password or a signing key passed as an argument is
+// readable by every user on the machine through /proc. Each is also checked
+// against the file's permissions before it is used.
+var secretKeys = []string{"smb-password", "auth-password", "jwt-secret"}
+
+var configOnlyKeys = func() map[string]bool {
+	m := map[string]bool{}
+	for _, k := range secretKeys {
+		m[k] = true
+	}
+	return m
+}()
 
 type configFile struct {
 	path   string

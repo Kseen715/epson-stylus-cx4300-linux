@@ -13,6 +13,29 @@ import (
 	"github.com/hirochachacha/go-smb2"
 )
 
+// validName reports whether name is a plain file name, safe to join onto a
+// local directory or an SMB path. Neither store may be asked to escape its own
+// directory, and the checks that look sufficient are not: filepath.Base only
+// splits on the separator of the machine escan runs on, so on Linux it happily
+// passes `..\..\secret.png` straight through to the backslash-separated path an
+// SMB share uses. So the rule is an allowlist rather than a search for the
+// traversal of the day - a name is exactly what scan files are named, and
+// anything else is refused.
+func validName(name string) bool {
+	if name == "" || len(name) > 255 || strings.HasPrefix(name, ".") {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // store is where finished scans are written, and read back from when the
 // browser asks for one at full resolution. Two implementations: the local
 // filesystem, and an SMB share escan talks to itself.
@@ -55,11 +78,21 @@ func newLocalStore(dir string) (*localStore, error) {
 	return &localStore{dir: abs}, nil
 }
 
+// errBadName is returned rather than a path error, so nothing about the layout
+// of the output directory leaks back to whoever asked for the odd name.
+var errBadName = errors.New("not a valid file name")
+
 func (l *localStore) Create(name string) (io.WriteCloser, error) {
+	if !validName(name) {
+		return nil, errBadName
+	}
 	return os.Create(filepath.Join(l.dir, name))
 }
 
 func (l *localStore) Open(name string) (io.ReadSeekCloser, time.Time, error) {
+	if !validName(name) {
+		return nil, time.Time{}, errBadName
+	}
 	f, err := os.Open(filepath.Join(l.dir, name))
 	if err != nil {
 		return nil, time.Time{}, err
@@ -179,6 +212,9 @@ func (f *smbFile) Close() error {
 }
 
 func (s *smbStore) Create(name string) (io.WriteCloser, error) {
+	if !validName(name) {
+		return nil, errBadName
+	}
 	c, err := s.connect()
 	if err != nil {
 		return nil, err
@@ -192,6 +228,9 @@ func (s *smbStore) Create(name string) (io.WriteCloser, error) {
 }
 
 func (s *smbStore) Open(name string) (io.ReadSeekCloser, time.Time, error) {
+	if !validName(name) {
+		return nil, time.Time{}, errBadName
+	}
 	c, err := s.connect()
 	if err != nil {
 		return nil, time.Time{}, err

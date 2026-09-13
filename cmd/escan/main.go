@@ -17,7 +17,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +36,12 @@ const (
 	defaultScanDPI    = 300  // preselected in the scan resolution menu
 	defaultPreviewMax = 900  // longest edge of the preview sent to the browser
 	defaultDisplayMax = 1600 // longest edge of a finished scan shown in the browser
+
+	// A short life for the token every request carries, and a long one for the
+	// token that silently renews it: a leaked access token is stale within the
+	// quarter hour, while a browser at home stays logged in for a year.
+	defaultAuthTTL        = 15 * time.Minute
+	defaultAuthRefreshTTL = 365 * 24 * time.Hour
 )
 
 type server struct {
@@ -45,6 +50,7 @@ type server struct {
 	scanDPI    int
 	previewMax int
 	displayMax int
+	authOn     bool
 
 	// scanMu serialises device access. Two concurrent scans wedge this
 	// scanner, so every request that touches it holds this lock.
@@ -75,6 +81,12 @@ func main() {
 		"write scans to an SMB share instead of a local directory, as //host/share[/subdir]")
 	smbUser := flag.String("smb-user", "", "user to log in to the SMB share as")
 	smbDomain := flag.String("smb-domain", "", "domain or workgroup for the SMB login")
+	authUser := flag.String("auth-user", "",
+		"user name for the login page; with auth-password in the settings file, it turns authentication on")
+	authTTL := flag.Duration("auth-ttl", defaultAuthTTL,
+		"how long a login token is accepted for before it is renewed from the refresh token")
+	authRefreshTTL := flag.Duration("auth-refresh-ttl", defaultAuthRefreshTTL,
+		"how long a browser stays logged in without typing the password again")
 	flag.Parse()
 
 	// The file fills in whatever the command line did not, so a service can be
@@ -83,15 +95,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	smbPassword := ""
+	smbPassword, authPassword, jwtSecret := "", "", ""
 	if cfg != nil {
 		if err := cfg.apply(flag.CommandLine, explicitFlags(flag.CommandLine)); err != nil {
 			log.Fatal(err)
 		}
-		if err := cfg.checkSecret("smb-password"); err != nil {
-			log.Fatal(err)
+		for _, key := range secretKeys {
+			if err := cfg.checkSecret(key); err != nil {
+				log.Fatal(err)
+			}
 		}
 		smbPassword = cfg.get("smb-password")
+		authPassword = cfg.get("auth-password")
+		jwtSecret = cfg.get("jwt-secret")
+	}
+
+	guard, err := newAuth(*authUser, authPassword, jwtSecret, *authTTL, *authRefreshTTL)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	dest, err := openStore(*smbAddress, *smbUser, smbPassword, *smbDomain, *out)
@@ -104,6 +125,7 @@ func main() {
 		scanDPI:    *scanDPI,
 		previewMax: *previewMax,
 		displayMax: *displayMax,
+		authOn:     guard != nil,
 	}
 	// Fail at startup rather than on the first scan.
 	for _, f := range []struct {
@@ -121,6 +143,17 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+	if guard != nil {
+		// /login is the same file the static server would hand out at
+		// /login.html; naming it here keeps the address in the redirect, in the
+		// page and in openPaths identical.
+		mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFileFS(w, r, sub, "login.html")
+		})
+		mux.HandleFunc("/api/login", guard.handleLogin)
+		mux.HandleFunc("/api/refresh", guard.handleRefresh)
+		mux.HandleFunc("/api/logout", guard.handleLogout)
+	}
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/preview", s.handlePreview)
 	mux.HandleFunc("/api/scan", s.handleScan)
@@ -128,9 +161,18 @@ func main() {
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/file/", s.handleFile)
 
+	var handler http.Handler = mux
+	if guard != nil {
+		handler = guard.guard(mux)
+		log.Printf("authentication is on; log in as %s", *authUser)
+	} else {
+		log.Printf("WARNING: no auth-user/auth-password configured: anything that can " +
+			"reach this address can scan and can download every scan in the output location")
+	}
+
 	srv := &http.Server{
 		Addr:        *addr,
-		Handler:     mux,
+		Handler:     handler,
 		ReadTimeout: 30 * time.Second,
 		// No write timeout: a 600 dpi full-bed scan takes minutes over this
 		// device's USB 1.1 link.
@@ -177,6 +219,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"dpiOptions":  cx4300.SupportedDPI,
 		"outDir":      s.out.Describe(),
 		"canReset":    false,
+		"auth":        s.authOn,
 	}
 	if warn := hubWarning(); warn != "" {
 		resp["warning"] = warn
@@ -388,8 +431,10 @@ func writePNG(st store, name string, img image.Image) error {
 // not depend on the shrunk copy the page is displaying.
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/file/")
-	// Only ever serve a plain file name from the output directory.
-	if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+	// Only ever serve a plain file name from the output location. The store
+	// enforces this too - it is the layer that builds the path - but refusing
+	// here keeps a bad name out of the SMB session entirely.
+	if !validName(name) {
 		http.NotFound(w, r)
 		return
 	}

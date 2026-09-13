@@ -205,8 +205,10 @@
 <body>
 <div class="wrap">
   <header class="cut">
-    <h1>Epson Stylus CX4300 &mdash; Scanner</h1>
+    <h1>Epson Stylus CX4300 - Scanner</h1>
     <p id="status">connecting&hellip;</p>
+    <!-- Only shown once /api/status says this server asks for a login. -->
+    <button id="btnLogout" hidden style="margin-top:10px">Sign out</button>
   </header>
 
   <div id="warning" class="warn" hidden></div>
@@ -230,7 +232,7 @@
       </div>
     </div>
     <p class="muted" id="hint" style="margin:10px 0 0;font-size:12px">
-      75 dpi is the lowest the scanner offers and the quickest &mdash; good for a
+      75 dpi is the lowest the scanner offers and the quickest - good for a
       preview, and often good enough for a real scan.
     </p>
     <div id="progressWrap" hidden style="margin-top:12px">
@@ -258,7 +260,7 @@
             <circle cx="38" cy="38" r="7"/>
             <circle cx="38" cy="38" r="1.5" fill="currentColor" stroke="none"/>
           </svg>
-          <span>No preview yet &mdash; scan one to begin</span>
+          <span>No preview yet - scan one to begin</span>
         </div>
         <canvas id="canvas" hidden></canvas>
         <img id="resultImg" hidden alt="last scan">
@@ -269,9 +271,9 @@
       <p class="label">Selection</p>
       <dl>
         <dt>Size</dt><dd id="selMm">whole bed</dd>
-        <dt>Output</dt><dd id="selPx">&mdash;</dd>
-        <dt>Origin</dt><dd id="selPos">&mdash;</dd>
-        <dt>Last run</dt><dd id="lastRun">&mdash;</dd>
+        <dt>Output</dt><dd id="selPx">-</dd>
+        <dt>Origin</dt><dd id="selPos">-</dd>
+        <dt>Last run</dt><dd id="lastRun">-</dd>
       </dl>
       <div class="row" style="margin-top:12px">
         <button id="btnClear" disabled>Clear selection</button>
@@ -290,7 +292,7 @@
   <p class="foot">
     Scans are written to <code id="outDir">&hellip;</code>.
     This device must be plugged straight into a root-hub port, and nothing else
-    (<code>scanimage</code> in particular) may talk to it &mdash; one ESC/I probe
+    (<code>scanimage</code> in particular) may talk to it - one ESC/I probe
     locks it up until mains power is cut.
   </p>
 </div>

@@ -45,6 +45,18 @@ const state = {
   busy: false,
 };
 
+// Every call to the server goes through here. The access token is short-lived
+// and renewed by the server in passing, so a 401 means the long-lived refresh
+// token is gone or expired too: the only thing left is to log in again.
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    window.location.replace('/login');
+    throw new Error('signed out');
+  }
+  return r;
+}
+
 function showError(msg) {
   const box = el('error');
   if (!msg) { box.hidden = true; return; }
@@ -76,7 +88,7 @@ function fillSelect(sel, values, chosen) {
 
 async function refreshStatus() {
   try {
-    const s = await (await fetch('/api/status')).json();
+    const s = await (await api('/api/status')).json();
     const opts = s.dpiOptions || CONFIG.dpiOptions;
     fillSelect(el('previewDpi'), opts, s.previewDpi || CONFIG.previewDpi);
     fillSelect(el('dpi'), opts, s.scanDpi || CONFIG.scanDpi);
@@ -89,6 +101,7 @@ async function refreshStatus() {
     el('warning').hidden = !s.warning;
     if (s.warning) el('warning').textContent = s.warning;
     el('btnReset').hidden = !s.canReset;
+    el('btnLogout').hidden = !s.auth;
     showError(s.error || '');
   } catch (e) {
     el('status').textContent = 'cannot reach the escan server';
@@ -254,7 +267,7 @@ function startPolling() {
   stopPolling();
   pollTimer = setInterval(async () => {
     try {
-      const p = await (await fetch('/api/progress')).json();
+      const p = await (await api('/api/progress')).json();
       el('bar').style.width = (p.percent || 0).toFixed(1) + '%';
       const mb = (v) => (v / (1024 * 1024)).toFixed(1);
       el('progressText').textContent = p.total > 0
@@ -272,7 +285,7 @@ async function requestScan(url, body, { asPreview }) {
   setBusy(true);
   startPolling();
   try {
-    const r = await fetch(url, {
+    const r = await api(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
@@ -389,10 +402,15 @@ el('viewResult').addEventListener('click', () => setView('result'));
 el('btnReset').addEventListener('click', async () => {
   setBusy(true);
   try {
-    const r = await fetch('/api/reset', { method: 'POST' });
+    const r = await api('/api/reset', { method: 'POST' });
     if (!r.ok) showError((await r.json()).error || `HTTP ${r.status}`);
   } catch (e) { showError(String(e)); }
   finally { setBusy(false); refreshStatus(); }
+});
+
+el('btnLogout').addEventListener('click', async () => {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch (e) { /* going anyway */ }
+  window.location.replace('/login');
 });
 
 refreshViewButtons();
