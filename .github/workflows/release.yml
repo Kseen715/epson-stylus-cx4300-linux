@@ -3,7 +3,6 @@ name: build
 on:
   push:
     branches: [master]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -81,21 +80,42 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Tags only: every other trigger stops at the artifacts above.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Pushes to master and manual runs cut a release; pull requests stop at the
+    # artifacts above.
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # tags, so today's releases can be counted
+
+      - name: Pick the next vYYYYMMDD.N tag
+        id: tag
+        run: |
+          date="v$(date -u +%Y%m%d)"
+          # Highest N already used today, 0 when today has no release yet.
+          n=$(git tag --list "${date}.*" \
+              | sed "s/^${date}\.//" \
+              | grep -E '^[0-9]+$' \
+              | sort -n | tail -1)
+          echo "tag=${date}.$(( ${n:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
       - name: Collect checksums into one file
         run: cat dist/*.sha256 | sort -k2 > dist/SHA256SUMS && rm -f dist/*.sha256
+
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
           body: |
