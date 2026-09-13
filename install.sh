@@ -56,6 +56,21 @@ install_pkgs() {
     esac
 }
 
+# Inside a .run installer the binary is already built and sits next to this
+# script, so the whole toolchain half of the install is skipped. Everything
+# after it - udev rule, epkowa, the unit - is identical either way.
+# An if, not a && chain: under `set -e` a false chain would end the script here.
+PREBUILT=""
+if [ -x "./escan" ] && [ ! -f go.mod ]; then
+    PREBUILT="./escan"
+fi
+
+if [ -n "$PREBUILT" ]; then
+    step "Installing the bundled escan binary"
+    install -m 0755 "$PREBUILT" "${BIN_DIR}/escan"
+    say "installed ${BIN_DIR}/escan (prebuilt, no toolchain needed)"
+else
+
 step "Build dependencies"
 # Go is needed only to build; the finished binary has no runtime dependencies
 # (no libusb, no Python, no SANE).
@@ -78,6 +93,7 @@ step "Building escan"
 # makes git refuse to report status, which would otherwise fail the build.
 GOCACHE="${PWD}/.gocache" go build -trimpath -buildvcs=false -o "${BIN_DIR}/escan" ./cmd/escan
 say "installed ${BIN_DIR}/escan"
+fi
 
 step "USB access"
 if ! getent group scanner >/dev/null 2>&1; then

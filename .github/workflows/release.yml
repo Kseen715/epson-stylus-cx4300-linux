@@ -1,0 +1,110 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `label` is what users see in the file name; goarch is what Go calls it.
+          - {label: x86_64,  goarch: amd64}
+          - {label: x86,     goarch: '386'}
+          - {label: aarch64, goarch: arm64}
+          - {label: armv7,   goarch: arm,    goarm: '7'}
+          - {label: mips,    goarch: mips,   gomips: softfloat}
+          - {label: mipsel,  goarch: mipsle, gomips: softfloat}
+          - {label: riscv64, goarch: riscv64}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # No cgo anywhere in the tree, so CGO_ENABLED=0 yields a static binary
+      # with no libc of its own: the same file runs on glibc and musl systems.
+      - name: Build escan
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=false \
+            -ldflags '-s -w' \
+            -o "dist/escan-linux-${{ matrix.label }}" ./cmd/escan
+          file "dist/escan-linux-${{ matrix.label }}"
+
+      - name: Package .run installer
+        run: |
+          scripts/make-run.sh \
+            "dist/escan-linux-${{ matrix.label }}" \
+            "${{ matrix.label }}" \
+            "dist/escan-linux-${{ matrix.label }}.run"
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum "escan-linux-${{ matrix.label }}" \
+                    "escan-linux-${{ matrix.label }}.run" \
+            > "escan-linux-${{ matrix.label }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: escan-linux-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # Tags only: every other trigger stops at the artifacts above.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Collect checksums into one file
+        run: cat dist/*.sha256 | sort -k2 > dist/SHA256SUMS && rm -f dist/*.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Static binaries, no libc dependency: each build runs on glibc and
+            musl systems alike, and needs no libusb, SANE or Python.
+
+            `escan-linux-<arch>` is the bare executable.
+            `escan-linux-<arch>.run` is a self-extracting installer that also
+            writes the udev rule and disables the epkowa SANE backend:
+
+                chmod +x escan-linux-x86_64.run
+                sudo ./escan-linux-x86_64.run            # add --service for systemd

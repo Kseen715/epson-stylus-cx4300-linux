@@ -62,17 +62,43 @@ one click away, selection unchanged.
 
 ## Install
 
-Linux:
+Linux, from a release - no toolchain needed:
+
+```sh
+chmod +x escan-linux-x86_64.run
+sudo ./escan-linux-x86_64.run       # add --service to run it from boot
+escan                               # then open http://127.0.0.1:8080/
+```
+
+Each `.run` is a self-extracting installer holding the binary, the installer and
+the example unit files; `--extract DIR` unpacks it without installing anything.
+The bare executable is published next to it if you would rather place it
+yourself. Every release carries one of each per architecture:
+
+| Release file | Machine |
+|---|---|
+| `escan-linux-x86_64` | 64-bit PC |
+| `escan-linux-x86` | 32-bit PC |
+| `escan-linux-aarch64` | 64-bit ARM (Raspberry Pi 3 and later, most SBCs) |
+| `escan-linux-armv7` | 32-bit ARM |
+| `escan-linux-mips` / `-mipsel` | MIPS routers and NAS boxes, big and little endian |
+| `escan-linux-riscv64` | 64-bit RISC-V |
+
+There is no separate glibc and musl download: the builds contain no C at all, so
+one static file runs on either. Nothing else is needed at runtime either - no
+libusb, no Python, no SANE.
+
+Linux, from source:
 
 ```sh
 sudo ./install.sh
 escan                      # then open http://127.0.0.1:8080/
 ```
 
-The installer builds the binary, adds a udev rule so the `scanner` group can use
-the device without root, and **disables the `epkowa` SANE backend** - see the
-warning below. The finished binary has no runtime dependencies: no libusb, no
-Python, no SANE.
+Either way the installer adds a udev rule so the `scanner` group can use the
+device without root, and **disables the `epkowa` SANE backend** - see the
+warning below. From a source checkout it builds the binary first; from a `.run`
+it installs the one already inside.
 
 Windows:
 
