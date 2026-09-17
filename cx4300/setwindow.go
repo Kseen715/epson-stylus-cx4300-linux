@@ -3,6 +3,7 @@ package cx4300
 import (
 	"encoding/binary"
 	"image"
+	"io"
 	"math"
 )
 
@@ -124,6 +125,52 @@ func PlaneStride(width int) int { return (width + planePad - 1) / planePad * pla
 // WireSize returns how many bytes a scan of this pixel size occupies on the
 // wire: three padded colour planes per line.
 func WireSize(width, height int) int { return PlaneStride(width) * 3 * height }
+
+// rowWriter turns the device's planar wire format into interleaved RGB rows as
+// the bytes arrive, so a scan can be streamed instead of buffered. Blocks from
+// the device do not line up with lines on the wire, so whatever is left over
+// after the last whole line is carried into the next write.
+type rowWriter struct {
+	out    io.Writer
+	width  int // pixels per row
+	plane  int // padded pixels per colour plane
+	stride int // bytes per wire line, all three planes
+	held   []byte
+	row    []byte
+	lines  int
+}
+
+func newRowWriter(out io.Writer, width int) *rowWriter {
+	plane := PlaneStride(width)
+	return &rowWriter{
+		out:    out,
+		width:  width,
+		plane:  plane,
+		stride: plane * 3,
+		row:    make([]byte, width*3),
+	}
+}
+
+func (w *rowWriter) write(chunk []byte) error {
+	w.held = append(w.held, chunk...)
+	done := 0
+	for len(w.held)-done >= w.stride {
+		line := w.held[done : done+w.stride]
+		g, b := line[w.plane:], line[2*w.plane:]
+		for x := 0; x < w.width; x++ {
+			w.row[x*3+0] = line[x]
+			w.row[x*3+1] = g[x]
+			w.row[x*3+2] = b[x]
+		}
+		if _, err := w.out.Write(w.row); err != nil {
+			return err
+		}
+		done += w.stride
+		w.lines++
+	}
+	w.held = append(w.held[:0], w.held[done:]...)
+	return nil
+}
 
 // Deinterleave converts the device's planar output into an image. Each scan
 // line arrives as three consecutive colour planes - the whole red row, then

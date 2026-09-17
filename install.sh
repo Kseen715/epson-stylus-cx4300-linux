@@ -1,26 +1,37 @@
 #!/bin/sh
-# Install the CX4300 scanner tool: build the binary, grant USB access, and
-# disable the one SANE backend that bricks this scanner until it is power
-# cycled.
+# Install the CX4300 scanner tool: build the binary and the SANE backend, grant
+# USB access, and disable the Epson SANE backends that brick this scanner until
+# it is power cycled.
 #
 # Run from the repository root:   sudo ./install.sh
 # Add --service to also run it in the background from boot, as a systemd unit.
+# Add --no-sane to install only the web UI, leaving SANE alone.
 set -eu
 
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 UDEV_RULE="/etc/udev/rules.d/60-epson-cx4300.rules"
 UNIT="/etc/systemd/system/escan.service"
 CONF="/etc/escan.conf"
+SANE_CONF_DIR="/etc/sane.d"
+BACKEND=cx4300
 VID=04b8
 PID=083f
 
+# Backends that probe this device with ESC/I. Any one of them turns a single
+# "scanimage -L" into a scanner that answers nothing until its mains lead is
+# pulled, so they are disabled rather than left to race with ours.
+ESCI_BACKENDS="epkowa epson epson2 epsonds"
+
 WANT_SERVICE=no
+WANT_SANE=yes
 for arg in "$@"; do
     case "$arg" in
         --service) WANT_SERVICE=yes ;;
+        --no-sane) WANT_SANE=no ;;
         -h|--help)
-            printf 'usage: sudo ./install.sh [--service]\n'
+            printf 'usage: sudo ./install.sh [--service] [--no-sane]\n'
             printf '  --service  also install and enable the systemd unit\n'
+            printf '  --no-sane  skip the SANE backend (web UI only)\n'
             exit 0 ;;
         *) printf 'error: unknown option %s\n' "$arg" >&2; exit 1 ;;
     esac
@@ -61,8 +72,12 @@ install_pkgs() {
 # after it - udev rule, epkowa, the unit - is identical either way.
 # An if, not a && chain: under `set -e` a false chain would end the script here.
 PREBUILT=""
+PREBUILT_BACKEND=""
 if [ -x "./escan" ] && [ ! -f go.mod ]; then
     PREBUILT="./escan"
+    if [ -f "./libsane-${BACKEND}.so.1" ]; then
+        PREBUILT_BACKEND="./libsane-${BACKEND}.so.1"
+    fi
 fi
 
 if [ -n "$PREBUILT" ]; then
@@ -93,6 +108,29 @@ step "Building escan"
 # makes git refuse to report status, which would otherwise fail the build.
 GOCACHE="${PWD}/.gocache" go build -trimpath -buildvcs=false -o "${BIN_DIR}/escan" ./cmd/escan
 say "installed ${BIN_DIR}/escan"
+
+if [ "$WANT_SANE" = yes ]; then
+    step "Building the SANE backend"
+    # A shared library, so this half needs a C compiler where the binary did
+    # not. Without one, the web UI still installs and works.
+    if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+        case "$PM" in
+            apt)    install_pkgs gcc ;;
+            xbps)   install_pkgs gcc ;;
+            pacman) install_pkgs gcc ;;
+            dnf)    install_pkgs gcc ;;
+        esac
+    fi
+    if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
+        GOCACHE="${PWD}/.gocache" CGO_ENABLED=1 go build -trimpath -buildvcs=false \
+            -buildmode=c-shared -o "./libsane-${BACKEND}.so.1" ./cmd/libsane-${BACKEND}
+        PREBUILT_BACKEND="./libsane-${BACKEND}.so.1"
+        say "built libsane-${BACKEND}.so.1"
+    else
+        WANT_SANE=no
+        say "no C compiler, so the SANE backend was skipped; the web UI is unaffected"
+    fi
+fi
 fi
 
 step "USB access"
@@ -113,25 +151,92 @@ fi
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger --subsystem-match=usb 2>/dev/null || true
 
-step "Protecting the scanner from epkowa"
-# Any SANE probe of this device sends an ESC/I command it does not implement,
-# which latches it into refusing everything until mains power is cut. One
-# "scanimage -L" is enough, so the backend is disabled here.
+step "Protecting the scanner from the ESC/I backends"
+# Any ESC/I probe of this device latches it into refusing everything until mains
+# power is cut, and one "scanimage -L" loads every enabled backend. So the ones
+# that probe Epson devices are disabled wherever they are enabled.
+#
+# SANE reads *every* file in dll.d, whatever it is called - a `.dpkg-new` left
+# by an iscan upgrade enables epkowa just as effectively as a live drop-in, and
+# so would a backup copy left in that directory. So nothing in dll.d is skipped
+# for its name, and the backups go in the parent directory, which SANE only
+# reads per-backend .conf files from.
+BACKUP_DIR="${SANE_CONF_DIR}"
 disabled_any=no
-for f in /etc/sane.d/dll.conf /etc/sane.d/dll.d/*; do
+for f in "${SANE_CONF_DIR}"/dll.conf "${SANE_CONF_DIR}"/dll.d/*; do
     [ -f "$f" ] || continue
-    # Skip packaging leftovers and our own backups; editing those changes nothing.
     case "$f" in
-        *.dpkg-*|*.rpmnew|*.rpmsave|*.bak*|*~) continue ;;
+        *.bak-cx4300) continue ;;   # our own backups, already dealt with
     esac
-    if grep -qE '^[[:space:]]*epkowa[[:space:]]*$' "$f"; then
-        cp -n "$f" "${f}.bak-cx4300" 2>/dev/null || true
-        sed -i 's/^[[:space:]]*epkowa[[:space:]]*$/# epkowa disabled by cx4300 install.sh: its ESC\/I probe locks this scanner up/' "$f"
-        say "disabled epkowa in $f (backup: ${f}.bak-cx4300)"
-        disabled_any=yes
-    fi
+    for be in $ESCI_BACKENDS; do
+        if grep -qE "^[[:space:]]*${be}[[:space:]]*$" "$f"; then
+            backup="${BACKUP_DIR}/$(basename "$f").bak-cx4300"
+            cp -n "$f" "$backup" 2>/dev/null || true
+            sed -i "s/^[[:space:]]*${be}[[:space:]]*\$/# ${be} disabled by cx4300 install.sh: its ESC\/I probe locks this scanner up/" "$f"
+            say "disabled ${be} in $f (backup: ${backup})"
+            disabled_any=yes
+        fi
+    done
 done
-[ "$disabled_any" = yes ] || say "epkowa was not enabled anywhere; nothing to do"
+[ "$disabled_any" = yes ] || say "no ESC/I backend was enabled; nothing to do"
+
+# Say so plainly if one is still enabled somewhere this script did not look:
+# the next "scanimage -L" would lock the scanner up, and the symptom - the
+# device vanishing from USB - looks nothing like a configuration problem.
+still=""
+for f in "${SANE_CONF_DIR}"/dll.conf "${SANE_CONF_DIR}"/dll.d/*; do
+    [ -f "$f" ] || continue
+    case "$f" in
+        *.bak-cx4300) continue ;;
+    esac
+    for be in $ESCI_BACKENDS; do
+        if grep -qE "^[[:space:]]*${be}[[:space:]]*$" "$f"; then
+            still="${still} ${be}:${f}"
+        fi
+    done
+done
+if [ -n "$still" ]; then
+    say ""
+    say "WARNING: an ESC/I backend is still enabled:${still}"
+    say "Comment those lines out by hand, or the next scan from any SANE"
+    say "application will lock the scanner up until its mains lead is pulled."
+fi
+
+if [ "$WANT_SANE" = yes ] && [ -n "$PREBUILT_BACKEND" ]; then
+    step "Installing the SANE backend"
+    # Next to the backends already on the system, whichever directory that is.
+    SANE_LIB_DIR=""
+    for d in /usr/lib/"$(uname -m)"-linux-gnu/sane /usr/lib64/sane /usr/lib/sane /usr/local/lib/sane; do
+        if [ -d "$d" ]; then SANE_LIB_DIR="$d"; break; fi
+    done
+    if [ -z "$SANE_LIB_DIR" ]; then
+        say "SANE does not appear to be installed (no backend directory found)."
+        say "Install it - sane-utils/sane-backends - and re-run this script to add"
+        say "the backend; the web UI works either way."
+    else
+        install -m 0644 "$PREBUILT_BACKEND" "${SANE_LIB_DIR}/libsane-${BACKEND}.so.1"
+        say "installed ${SANE_LIB_DIR}/libsane-${BACKEND}.so.1"
+        # A drop-in where the distribution supports one, so dll.conf is left as
+        # its package manager wrote it.
+        if [ -d "${SANE_CONF_DIR}/dll.d" ]; then
+            printf '# Epson Stylus CX4300 family, via this repository\n%s\n' "$BACKEND" \
+                > "${SANE_CONF_DIR}/dll.d/${BACKEND}"
+            say "enabled it in ${SANE_CONF_DIR}/dll.d/${BACKEND}"
+        elif [ -f "${SANE_CONF_DIR}/dll.conf" ]; then
+            if ! grep -qE "^[[:space:]]*${BACKEND}[[:space:]]*$" "${SANE_CONF_DIR}/dll.conf"; then
+                printf '%s\n' "$BACKEND" >> "${SANE_CONF_DIR}/dll.conf"
+            fi
+            say "enabled it in ${SANE_CONF_DIR}/dll.conf"
+        else
+            install -d "$SANE_CONF_DIR"
+            printf '%s\n' "$BACKEND" > "${SANE_CONF_DIR}/dll.conf"
+            say "wrote ${SANE_CONF_DIR}/dll.conf"
+        fi
+        if command -v scanimage >/dev/null 2>&1; then
+            say "check it with:   scanimage -L"
+        fi
+    fi
+fi
 
 if [ "$WANT_SERVICE" = yes ]; then
     step "Installing the systemd service"
@@ -177,6 +282,10 @@ fi
 step "Done"
 say "Start it with:   escan            then open http://127.0.0.1:8080/"
 say "Save scans elsewhere with:   escan --out ~/scans"
+if [ "$WANT_SANE" = yes ] && [ -n "$PREBUILT_BACKEND" ]; then
+    say "XSane, GIMP, simple-scan and scanimage can now use the scanner too."
+    say "The two share the device: whichever starts a scan first gets it."
+fi
 say ""
 say "Two things this scanner insists on:"
 say "  * plug it straight into a root-hub port - behind any USB hub its identify"

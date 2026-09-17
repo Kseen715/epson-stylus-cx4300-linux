@@ -272,3 +272,53 @@ func TestParamsValidate(t *testing.T) {
 		}
 	}
 }
+
+// ScanTo streams the same image Scan builds in memory, so a SANE frontend
+// reading rows as they arrive and the web UI holding the whole scan see
+// identical pixels. The interesting case is a width whose plane is padded -
+// 1666 pixels go on the wire as 1680 - since the padding columns have to be
+// dropped while the data is still arriving in blocks that do not line up with
+// rows.
+func TestScanToMatchesScan(t *testing.T) {
+	const dpi = 300
+	area := Area{X: 0, Y: 0, W: 1666 * Unit / dpi, H: 40 * Unit / dpi}
+	w, h := area.Pixels(dpi)
+	if w != 1666 {
+		t.Fatalf("test needs a 1666 pixel wide area, got %d", w)
+	}
+
+	wire := make([]byte, WireSize(w, h))
+	for i := range wire {
+		wire[i] = byte(i * 7)
+	}
+	p := Params{DPI: dpi, Area: area}
+
+	img, err := New(&fakeScanner{wire: append([]byte(nil), wire...)}).Scan(p)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var buf bytes.Buffer
+	gotW, gotH, err := New(&fakeScanner{wire: append([]byte(nil), wire...)}).ScanTo(p, &buf)
+	if err != nil {
+		t.Fatalf("ScanTo: %v", err)
+	}
+	if gotW != w || gotH != h {
+		t.Fatalf("ScanTo reported %dx%d, want %dx%d", gotW, gotH, w, h)
+	}
+	if buf.Len() != w*h*3 {
+		t.Fatalf("ScanTo wrote %d bytes, want %d", buf.Len(), w*h*3)
+	}
+
+	rows := buf.Bytes()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			o := (y*w + x) * 3
+			if byte(r>>8) != rows[o] || byte(g>>8) != rows[o+1] || byte(b>>8) != rows[o+2] {
+				t.Fatalf("pixel (%d,%d): streamed %d,%d,%d but Scan has %d,%d,%d",
+					x, y, rows[o], rows[o+1], rows[o+2], r>>8, g>>8, b>>8)
+			}
+		}
+	}
+}

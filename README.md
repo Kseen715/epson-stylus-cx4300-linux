@@ -3,7 +3,8 @@
 The scanner half of the Epson Stylus CX4300 family (`04b8:083f`, shared with the
 CX4400, CX5500, CX5600, DX4400 and DX4450) does not work with Epson's own Linux
 driver. This repository contains the reverse-engineered protocol, a Go library
-that implements it, and a small web UI to scan with.
+that implements it, a SANE backend so ordinary scanning applications can use the
+device, and a small web UI to scan with.
 
 Works on Linux (direct USB) and Windows (through WIA).
 
@@ -13,6 +14,7 @@ Works on Linux (direct USB) and Windows (through WIA).
 |---|---|
 | `cx4300/` | the protocol as an importable Go library |
 | `cmd/escan/` | web UI: preview, crop, scan |
+| `cmd/libsane-cx4300/` | SANE backend, so XSane, GIMP, simple-scan and `scanimage` work |
 | `install.sh` / `install.ps1` | installers (`--service` / `-Service` also runs it in the background) |
 | `examples/` | systemd units and the Windows logon task, ready to edit by hand |
 | [PROTOCOL.md](PROTOCOL.md) | the wire protocol, in detail |
@@ -84,9 +86,11 @@ escan                      # then open http://127.0.0.1:8080/
 ```
 
 Either way the installer adds a udev rule so the `scanner` group can use the
-device without root, and **disables the `epkowa` SANE backend** - see the
-warning below. From a source checkout it builds the binary first; from a `.run`
-it installs the one already inside.
+device without root, installs the SANE backend, and **disables the Epson SANE
+backends** (`epkowa`, `epson`, `epson2`, `epsonds`) - see the warning below.
+From a source checkout it builds both the binary and the backend; from a `.run`
+it installs what is already inside. Pass `--no-sane` to leave SANE alone and
+install only the web UI.
 
 Windows:
 
@@ -211,16 +215,46 @@ Two things worth knowing:
   fails immediately. With
   `Restart=on-failure` in the unit, a NAS that is still booting is retried.
 
+## Scanning from ordinary applications
+
+The SANE backend (`libsane-cx4300.so.1`) makes the scanner look like any other
+to XSane, GIMP, simple-scan, Document Scanner, `scanimage` and anything else
+built on SANE:
+
+```sh
+scanimage -L                                   # cx4300:cx4300 ... flatbed scanner
+scanimage --resolution 300 --format=png > a.png
+scanimage --resolution 150 -l 20 -t 30 -x 100 -y 150 --format=png > crop.png
+```
+
+It offers the options the device actually has and no others: `resolution` (75,
+150, 300 or 600 dpi) and the four geometry options `-l/-t/-x/-y` in millimetres.
+Output is always 24-bit colour, because that is the only mode the hardware has;
+a frontend that wants grayscale converts it itself.
+
+The backend claims the USB device only while a scan is running, so the web UI
+and a SANE frontend can both be open at once - whichever starts a scan first
+gets the device, and the other is told it is busy. Cancelling a scan stops the
+rows reaching the frontend but deliberately lets the transfer finish in the
+background, because a device abandoned mid-transfer wedges until its mains power
+is cut.
+
+When something goes wrong, SANE gives a frontend a status code and nothing else,
+so the backend also writes an explanation to stderr - run the frontend from a
+terminal to see it.
+
 ## Two things this scanner insists on
 
 Both cost a lot of debugging time, and neither is a software bug.
 
-**Never let SANE touch it.** `epkowa` opens by probing with ESC/I (`1b 66`).
-This device does not implement ESC/I, and that probe is an invalid SCSI command
-which latches the scanner into refusing *everything* until mains power is
-removed. A single `scanimage -L` is enough. Re-plugging USB does not clear it.
-`install.sh` disables the backend for you; the library reports this state as
-`ErrLatched`.
+**Never let an ESC/I backend touch it.** `epkowa` - and Epson's `epson`,
+`epson2` and `epsonds` - open by probing with ESC/I (`1b 66`). This device does
+not implement ESC/I, and that probe is an invalid SCSI command which latches the
+scanner into refusing *everything* until mains power is removed. A single
+`scanimage -L` is enough, because that loads every enabled backend. Re-plugging
+USB does not clear it. `install.sh` disables those backends for you, which is
+what makes the `cx4300` backend safe to enable; the library reports this state
+as `ErrLatched`.
 
 **Plug it straight into a root-hub port.** Behind any USB hub its identify step
 fails and the scan area reads back as zero. Internal hubs count - Intel
@@ -257,5 +291,8 @@ widths, including a crop width that distinguishes it from 32 and 64 - see
 Not verified: 600 dpi. It should work, but a full-bed 600 dpi scan is ~107 MB
 over this device's USB 1.1 link, so time it before assuming a timeout is a bug.
 
-This is not a SANE backend, so XSane and GIMP cannot use it. Writing one around
-`cx4300/` would be a reasonable next step - the protocol work is done.
+The SANE backend is a cgo shared library, so releases carry one only for the
+architectures the build has a C compiler for (x86_64 and aarch64); on any other
+architecture `install.sh` builds it from source, and skips it if no C compiler
+is available. It is Linux-only - on Windows the same applications reach the
+scanner through Epson's own WIA driver.

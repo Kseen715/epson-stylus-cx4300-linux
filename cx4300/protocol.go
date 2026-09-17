@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"io"
 	"strings"
 	"time"
 )
@@ -176,6 +177,47 @@ func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 		return nil, 0, 0, err
 	}
 	width, height = p.Area.Pixels(p.DPI)
+	raw = make([]byte, 0, WireSize(width, height))
+	err = d.scan(p, func(chunk []byte) error {
+		raw = append(raw, chunk...)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return raw, width, height, nil
+}
+
+// ScanTo performs one scan and writes it to w as the data arrives, one row of
+// 8-bit RGB triples after another, with the wire format's colour planes
+// interleaved and its padding columns removed. It returns the pixel width of a
+// row and how many rows were written, which is the requested height unless the
+// device ended the image early.
+//
+// Use this rather than Scan when the image is consumed as a stream - a SANE
+// frontend, a file, a socket - so that neither the raw nor the decoded image is
+// ever held in memory in full. w must keep up: this blocks while it writes, and
+// the device tolerates the pause between image blocks.
+func (d *Device) ScanTo(p Params, w io.Writer) (width, height int, err error) {
+	if err := p.Validate(); err != nil {
+		return 0, 0, err
+	}
+	width, _ = p.Area.Pixels(p.DPI)
+	rows := newRowWriter(w, width)
+	if err := d.scan(p, rows.write); err != nil {
+		return 0, 0, err
+	}
+	return width, rows.lines, nil
+}
+
+// scan runs the command sequence for one scan, handing each block of image data
+// to sink as it arrives. Both ScanRaw and ScanTo are this loop with a different
+// sink; nothing else should speak to the device while it runs.
+func (d *Device) scan(p Params, sink func(chunk []byte) error) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	width, height := p.Area.Pixels(p.DPI)
 	total := WireSize(width, height)
 
 	d.drain()
@@ -184,62 +226,65 @@ func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 	// before we start moving the carriage.
 	short, err2 := d.command("INQUIRY", []byte{0x12, 0, 0, 0, 0x33, 0}, nil, 51)
 	if err2 != nil {
-		return nil, 0, 0, err2
+		return err2
 	}
 	if len(short) == 0 {
-		return nil, 0, 0, ErrLatched
+		return ErrLatched
 	}
 
 	if _, err := d.command("TEST UNIT READY", []byte{0x00, 0, 0, 0, 0, 0}, nil, 0); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 	if _, err := d.command("RESERVE UNIT", []byte{0x16, 0, 0, 0, 0, 0}, nil, 0); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 	defer d.command("RELEASE UNIT", []byte{0x17, 0, 0, 0, 0, 0}, nil, 0)
 
 	win := BuildSetWindow(p.DPI, p.Area)
 	setWindow := []byte{0x24, 0, 0, 0, 0, 0, 0, 0, byte(len(win)), 0}
 	if _, err := d.command("SET WINDOW", setWindow, win, 0); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 	if _, err := d.command("INQUIRY(148)", []byte{0x12, 0, 0, 0, 0x94, 0}, nil, 148); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 	if _, err := d.command("WRITE gamma",
 		[]byte{0x2a, 0, 0x03, 0, 0, 0x94, 0, 0x10, 0, 0}, GammaTable(), 0); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 	// Calibration/shading data. The contents are all zeros in practice, but the
 	// device expects the exchange.
 	if _, err := d.command("READ calibration",
 		[]byte{0x28, 0, 0x80, 0, 0, 1, 0, 0xff, 0, 0}, nil, 0x00ff00); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 	if _, err := d.command("READ calibration end",
 		[]byte{0x28, 0, 0x80, 0, 0, 1, 0, 0x00, 0, 0}, nil, 0); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 
 	if _, err := d.command("SCAN", []byte{0x1b, 0, 0, 0, 0, 0}, nil, 0); err != nil {
-		return nil, 0, 0, err
+		return err
 	}
 
-	raw = make([]byte, 0, total)
-	for len(raw) < total {
-		want := min(ImageBlockSize, total-len(raw))
+	got := 0
+	for got < total {
+		want := min(ImageBlockSize, total-got)
 		cdb := []byte{0x28, 0, 0, 0, 0, 0,
 			byte(want >> 16), byte(want >> 8), byte(want), 0}
 		chunk, err := d.command("READ image", cdb, nil, want)
 		if err != nil {
-			return nil, 0, 0, err
+			return err
 		}
 		if len(chunk) == 0 {
 			break
 		}
-		raw = append(raw, chunk...)
+		got += len(chunk)
+		if err := sink(chunk); err != nil {
+			return err
+		}
 		if d.Progress != nil {
-			d.Progress(len(raw), total)
+			d.Progress(got, total)
 		}
 		if len(chunk) < want {
 			// The device had less than we asked for, so the image is complete
@@ -249,10 +294,10 @@ func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 			break
 		}
 	}
-	if len(raw) == 0 {
-		return nil, 0, 0, errors.New("cx4300: scan returned no image data")
+	if got == 0 {
+		return errors.New("cx4300: scan returned no image data")
 	}
-	return raw, width, height, nil
+	return nil
 }
 
 func printable(b []byte) string {

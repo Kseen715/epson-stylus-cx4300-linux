@@ -4,17 +4,23 @@
 # and hands over to install.sh, which installs the prebuilt binary rather than
 # building one.
 #
-#   scripts/make-run.sh <binary> <arch-label> <output.run>
+#   scripts/make-run.sh <binary> <arch-label> <output.run> [libsane-cx4300.so.1]
+#
+# The SANE backend is optional: it is a cgo shared library, so it only exists
+# for the architectures the release build has a C compiler for. Without it the
+# installer sets up the web UI alone.
 #
 # Deliberately has no dependency on makeself: the header below is the whole of
 # it, and tar/gzip are everywhere the result needs to run anyway.
 set -eu
 
-[ $# -eq 3 ] || { printf 'usage: %s <binary> <arch-label> <output.run>\n' "$0" >&2; exit 1; }
+[ $# -ge 3 ] && [ $# -le 4 ] ||
+    { printf 'usage: %s <binary> <arch-label> <output.run> [backend.so]\n' "$0" >&2; exit 1; }
 
 BINARY="$1"
 ARCH="$2"
 OUT="$3"
+BACKEND="${4:-}"
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 [ -f "$BINARY" ] || { printf 'error: no such binary: %s\n' "$BINARY" >&2; exit 1; }
@@ -25,6 +31,10 @@ PAYLOAD="${WORK}/payload"
 mkdir -p "${PAYLOAD}/examples"
 
 install -m 0755 "$BINARY" "${PAYLOAD}/escan"
+if [ -n "$BACKEND" ]; then
+    [ -f "$BACKEND" ] || { printf 'error: no such backend: %s\n' "$BACKEND" >&2; exit 1; }
+    install -m 0644 "$BACKEND" "${PAYLOAD}/libsane-cx4300.so.1"
+fi
 install -m 0755 "${REPO_ROOT}/install.sh" "${PAYLOAD}/install.sh"
 cp -R "${REPO_ROOT}/examples/." "${PAYLOAD}/examples/"
 
@@ -34,7 +44,7 @@ cat > "$OUT" <<HEADER
 #!/bin/sh
 # escan installer for linux/${ARCH} - self-extracting archive.
 # Everything below the __PAYLOAD__ line is a gzipped tar of the binary, the
-# installer and the example unit files.
+# SANE backend where one was built, the installer and the example unit files.
 #
 #   sudo ./$(basename "$OUT")              install the binary and the udev rule
 #   sudo ./$(basename "$OUT") --service    also run it from boot via systemd

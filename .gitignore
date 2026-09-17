@@ -5,3 +5,4 @@
 *.pnm
 cx4300-*.png
 image/raw/
+libsane-cx4300.so.*

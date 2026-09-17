@@ -1,0 +1,277 @@
+//go:build linux
+
+package main
+
+/*
+#include <stdlib.h>
+#include "sane_abi.h"
+*/
+import "C"
+
+import (
+	"math"
+	"unsafe"
+
+	"github.com/Kseen715/epson-stylus-cx4300-linux/cx4300"
+)
+
+// The option table. SANE requires option 0 to report how many options there
+// are; the rest is the conventional layout a frontend expects to find, with
+// each group followed by the options in it.
+const (
+	optCount = iota // option 0, "number of options"
+	optModeGroup
+	optResolution
+	optGeometryGroup
+	optTLX
+	optTLY
+	optBRX
+	optBRY
+	numOptions
+)
+
+// The device scans in 24-bit colour and nothing else - there is no mode option,
+// because there is no choice to offer. Frontends that ask for grayscale get
+// colour and convert it themselves.
+
+// buildOptions lays the option table out in C memory, where it stays for the
+// life of the process: SANE hands frontends a pointer to each descriptor and
+// they may read it at any time, so none of this is ever freed.
+func buildOptions() []C.SANE_Option_Descriptor {
+	mem := C.calloc(numOptions, C.sizeof_SANE_Option_Descriptor)
+	if mem == nil {
+		return nil
+	}
+	opts := unsafe.Slice((*C.SANE_Option_Descriptor)(mem), numOptions)
+
+	o := &opts[optCount]
+	o.name = C.CString("")
+	o.title = C.CString("Number of options")
+	o.desc = C.CString("Read-only option count.")
+	o._type = C.SANE_TYPE_INT
+	o.size = C.sizeof_SANE_Word
+	o.cap = C.SANE_CAP_SOFT_DETECT
+
+	o = &opts[optModeGroup]
+	o.title = C.CString("Scan mode")
+	o._type = C.SANE_TYPE_GROUP
+
+	o = &opts[optResolution]
+	o.name = C.CString("resolution")
+	o.title = C.CString("Resolution")
+	o.desc = C.CString("Resolution of the scan, in dots per inch.")
+	o._type = C.SANE_TYPE_INT
+	o.unit = C.SANE_UNIT_DPI
+	o.size = C.sizeof_SANE_Word
+	o.cap = C.SANE_CAP_SOFT_SELECT | C.SANE_CAP_SOFT_DETECT
+	o.constraint_type = C.SANE_CONSTRAINT_WORD_LIST
+	setConstraint(o, unsafe.Pointer(resolutionList()))
+
+	o = &opts[optGeometryGroup]
+	o.title = C.CString("Geometry")
+	o._type = C.SANE_TYPE_GROUP
+
+	xRange := newRange(bedWidthMM)
+	yRange := newRange(bedHeightMM)
+	for _, g := range []struct {
+		idx   int
+		name  string
+		title string
+		desc  string
+		rng   *C.SANE_Range
+	}{
+		{optTLX, "tl-x", "Top-left x", "Left edge of the scan area.", xRange},
+		{optTLY, "tl-y", "Top-left y", "Top edge of the scan area.", yRange},
+		{optBRX, "br-x", "Bottom-right x", "Right edge of the scan area.", xRange},
+		{optBRY, "br-y", "Bottom-right y", "Bottom edge of the scan area.", yRange},
+	} {
+		o = &opts[g.idx]
+		o.name = C.CString(g.name)
+		o.title = C.CString(g.title)
+		o.desc = C.CString(g.desc)
+		o._type = C.SANE_TYPE_FIXED
+		o.unit = C.SANE_UNIT_MM
+		o.size = C.sizeof_SANE_Word
+		o.cap = C.SANE_CAP_SOFT_SELECT | C.SANE_CAP_SOFT_DETECT
+		o.constraint_type = C.SANE_CONSTRAINT_RANGE
+		setConstraint(o, unsafe.Pointer(g.rng))
+	}
+	return opts
+}
+
+// setConstraint writes a pointer into the descriptor's constraint union, which
+// cgo presents as opaque bytes.
+func setConstraint(o *C.SANE_Option_Descriptor, p unsafe.Pointer) {
+	*(*unsafe.Pointer)(unsafe.Pointer(&o.constraint[0])) = p
+}
+
+// resolutionList renders SupportedDPI as a SANE word list: the count, then the
+// values.
+func resolutionList() *C.SANE_Word {
+	n := len(cx4300.SupportedDPI)
+	mem := (*C.SANE_Word)(C.calloc(C.size_t(n+1), C.sizeof_SANE_Word))
+	list := unsafe.Slice(mem, n+1)
+	list[0] = C.SANE_Word(n)
+	for i, dpi := range cx4300.SupportedDPI {
+		list[i+1] = C.SANE_Word(dpi)
+	}
+	return mem
+}
+
+// newRange is a 0..max millimetre range with no quantisation, so a frontend may
+// select any area on the glass.
+func newRange(maxMM float64) *C.SANE_Range {
+	r := (*C.SANE_Range)(C.calloc(1, C.sizeof_SANE_Range))
+	r.min = 0
+	r.max = C.SANE_Word(fix(maxMM))
+	r.quant = 0
+	return r
+}
+
+// buildDeviceLists renders the two NULL-terminated lists sane_get_devices
+// returns: one holding this scanner, and an empty one for when it is not
+// plugged in.
+func buildDeviceLists() (found, empty **C.SANE_Device) {
+	dev := (*C.SANE_Device)(C.calloc(1, C.sizeof_SANE_Device))
+	dev.name = C.CString(deviceName)
+	dev.vendor = C.CString("Epson")
+	dev.model = C.CString("Stylus CX4300 series")
+	dev._type = C.CString("flatbed scanner")
+
+	full := (**C.SANE_Device)(C.calloc(2, C.size_t(unsafe.Sizeof(dev))))
+	unsafe.Slice(full, 2)[0] = dev
+
+	none := (**C.SANE_Device)(C.calloc(1, C.size_t(unsafe.Sizeof(dev))))
+	return full, none
+}
+
+// controlOption implements sane_control_option for one option. The caller holds
+// mu and has already range-checked the option number.
+func (h *handle) controlOption(option int, action C.SANE_Action, value unsafe.Pointer,
+	info *C.SANE_Int) C.SANE_Status {
+	switch action {
+	case C.SANE_ACTION_GET_VALUE:
+		if value == nil {
+			return C.SANE_STATUS_INVAL
+		}
+		switch option {
+		case optCount:
+			*(*C.SANE_Int)(value) = numOptions
+		case optResolution:
+			*(*C.SANE_Int)(value) = C.SANE_Int(h.dpi)
+		case optTLX, optTLY, optBRX, optBRY:
+			*(*C.SANE_Fixed)(value) = *h.geometry(option)
+		default:
+			return C.SANE_STATUS_INVAL // the groups hold no value
+		}
+		return C.SANE_STATUS_GOOD
+
+	case C.SANE_ACTION_SET_VALUE:
+		if value == nil {
+			return C.SANE_STATUS_INVAL
+		}
+		switch option {
+		case optResolution:
+			want := int(*(*C.SANE_Int)(value))
+			got := nearestDPI(want)
+			h.dpi = got
+			*(*C.SANE_Int)(value) = C.SANE_Int(got)
+			setInfo(info, C.SANE_INFO_RELOAD_PARAMS, got != want)
+		case optTLX, optTLY, optBRX, optBRY:
+			want := *(*C.SANE_Fixed)(value)
+			got := h.setGeometry(option, want)
+			*(*C.SANE_Fixed)(value) = got
+			setInfo(info, C.SANE_INFO_RELOAD_PARAMS, got != want)
+		default:
+			return C.SANE_STATUS_INVAL
+		}
+		return C.SANE_STATUS_GOOD
+
+	case C.SANE_ACTION_SET_AUTO:
+		// No option is marked SANE_CAP_AUTOMATIC: there is nothing here the
+		// backend could sensibly choose on the frontend's behalf.
+		return C.SANE_STATUS_UNSUPPORTED
+	}
+	return C.SANE_STATUS_INVAL
+}
+
+func setInfo(info *C.SANE_Int, flags C.SANE_Int, inexact bool) {
+	if info == nil {
+		return
+	}
+	*info |= flags
+	if inexact {
+		*info |= C.SANE_INFO_INEXACT
+	}
+}
+
+func (h *handle) geometry(option int) *C.SANE_Fixed {
+	switch option {
+	case optTLX:
+		return &h.tlx
+	case optTLY:
+		return &h.tly
+	case optBRX:
+		return &h.brx
+	default:
+		return &h.bry
+	}
+}
+
+// setGeometry clamps an edge to the platen and keeps the two edges of each axis
+// in order, so that no combination of option writes can produce a negative
+// area. It returns the value actually stored.
+func (h *handle) setGeometry(option int, want C.SANE_Fixed) C.SANE_Fixed {
+	limit := fix(bedWidthMM)
+	if option == optTLY || option == optBRY {
+		limit = fix(bedHeightMM)
+	}
+	got := want
+	if got < 0 {
+		got = 0
+	}
+	if got > limit {
+		got = limit
+	}
+	*h.geometry(option) = got
+	// A frontend usually sets the top-left corner before the bottom-right one,
+	// so push the other edge rather than refusing the value.
+	switch option {
+	case optTLX:
+		if h.brx < got {
+			h.brx = got
+		}
+	case optTLY:
+		if h.bry < got {
+			h.bry = got
+		}
+	case optBRX:
+		if h.tlx > got {
+			h.tlx = got
+		}
+	case optBRY:
+		if h.tly > got {
+			h.tly = got
+		}
+	}
+	return got
+}
+
+// nearestDPI snaps a requested resolution to one the device offers. Frontends
+// respect the word list, so this only matters for ones that set a value blind.
+func nearestDPI(want int) int {
+	best, bestDist := cx4300.SupportedDPI[0], math.MaxInt
+	for _, dpi := range cx4300.SupportedDPI {
+		if d := abs(dpi - want); d < bestDist {
+			best, bestDist = dpi, d
+		}
+	}
+	return best
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}

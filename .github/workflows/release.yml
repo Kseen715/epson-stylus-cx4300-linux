@@ -57,9 +57,12 @@ jobs:
       matrix:
         include:
           # `label` is what users see in the file name; goarch is what Go calls it.
-          - {label: x86_64,  goarch: amd64}
+          # `cc` is set where a C compiler for the target is available on the
+          # runner: the SANE backend is a cgo shared library, so it is built
+          # only for those. The rest ship the web UI alone.
+          - {label: x86_64,  goarch: amd64,  cc: cc}
           - {label: x86,     goarch: '386'}
-          - {label: aarch64, goarch: arm64}
+          - {label: aarch64, goarch: arm64,  cc: aarch64-linux-gnu-gcc, apt: gcc-aarch64-linux-gnu}
           - {label: armv7,   goarch: arm,    goarm: '7'}
           - {label: mips,    goarch: mips,   gomips: softfloat}
           - {label: mipsel,  goarch: mipsle, gomips: softfloat}
@@ -74,8 +77,8 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      # No cgo anywhere in the tree, so CGO_ENABLED=0 yields a static binary
-      # with no libc of its own: the same file runs on glibc and musl systems.
+      # escan itself uses no cgo, so CGO_ENABLED=0 yields a static binary with
+      # no libc of its own: the same file runs on glibc and musl systems.
       - name: Build escan
         env:
           CGO_ENABLED: '0'
@@ -90,11 +93,37 @@ jobs:
             -o "dist/${NAME}" ./cmd/escan
           file "dist/${NAME}"
 
+      - name: Cross compiler for the SANE backend
+        if: matrix.apt != ''
+        run: sudo apt-get update -qq && sudo apt-get install -y ${{ matrix.apt }}
+
+      # The backend is a shared library that SANE dlopens, so unlike escan it
+      # links against the target's libc and is built per architecture.
+      - name: Build the SANE backend
+        if: matrix.cc != ''
+        env:
+          CGO_ENABLED: '1'
+          CC: ${{ matrix.cc }}
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w' \
+            -buildmode=c-shared -o "dist/libsane-cx4300-${NAME#escan-}.so.1" ./cmd/libsane-cx4300
+          file "dist/libsane-cx4300-${NAME#escan-}.so.1"
+
       - name: Package .run installer
-        run: scripts/make-run.sh "dist/${NAME}" "${{ matrix.label }}" "dist/${NAME}.run"
+        run: |
+          backend="dist/libsane-cx4300-${NAME#escan-}.so.1"
+          [ -f "$backend" ] || backend=""
+          scripts/make-run.sh "dist/${NAME}" "${{ matrix.label }}" "dist/${NAME}.run" $backend
 
       - name: Checksums
-        run: cd dist && sha256sum "${NAME}" "${NAME}.run" > "${NAME}.sha256"
+        run: |
+          cd dist
+          files="${NAME} ${NAME}.run"
+          backend="libsane-cx4300-${NAME#escan-}.so.1"
+          if [ -f "$backend" ]; then files="$files $backend"; fi
+          sha256sum $files > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -132,7 +161,9 @@ jobs:
 
             `escan-${{ needs.version.outputs.tag }}-linux-<arch>` is the bare
             executable. The `.run` beside it is a self-extracting installer that
-            also writes the udev rule and disables the epkowa SANE backend:
+            also writes the udev rule, installs the SANE backend where one was
+            built for that architecture, and disables the Epson SANE backends
+            whose ESC/I probe locks this scanner up:
 
                 chmod +x escan-${{ needs.version.outputs.tag }}-linux-x86_64.run
                 sudo ./escan-${{ needs.version.outputs.tag }}-linux-x86_64.run    # --service for systemd
