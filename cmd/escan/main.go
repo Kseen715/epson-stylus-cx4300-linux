@@ -54,6 +54,15 @@ type server struct {
 	displayMax int
 	authOn     bool
 
+	// web is the embedded page directory, and api the route table both the mux
+	// and the API document are built from. spec is that document, marshalled
+	// on first request and kept.
+	web      fs.FS
+	api      []route
+	specOnce sync.Once
+	spec     []byte
+	specErr  error
+
 	// hub holds the state every browser renders - progress, preview, crop and
 	// last scan - and pushes it out as it changes.
 	hub *hub
@@ -126,6 +135,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	sub, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &server{
 		hub:        newHub(),
 		live:       newLive(),
@@ -135,6 +148,7 @@ func main() {
 		previewMax: *previewMax,
 		displayMax: *displayMax,
 		authOn:     guard != nil,
+		web:        sub,
 	}
 	// Fail at startup rather than on the first scan.
 	for _, f := range []struct {
@@ -146,10 +160,6 @@ func main() {
 		}
 	}
 
-	sub, err := fs.Sub(webFS, "web")
-	if err != nil {
-		log.Fatal(err)
-	}
 	mux := http.NewServeMux()
 	// The page and its script are embedded in the binary, which gives them no
 	// modification time for a browser to revalidate against - so ask for no
@@ -163,21 +173,12 @@ func main() {
 		mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "login.html")
 		})
-		mux.HandleFunc("/api/login", guard.handleLogin)
-		mux.HandleFunc("/api/refresh", guard.handleRefresh)
-		mux.HandleFunc("/api/logout", guard.handleLogout)
 	}
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/api/preview", s.handlePreview)
-	mux.HandleFunc("/api/scan", s.handleScan)
-	mux.HandleFunc("/api/cancel", s.handleCancel)
-	mux.HandleFunc("/api/events", s.hub.handleEvents)
-	mux.HandleFunc("/api/live", s.handleLive)
-	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/selection", s.handleSelection)
-	mux.HandleFunc("/api/image/", s.handleImage)
-	mux.HandleFunc("/api/reset", s.handleReset)
-	mux.HandleFunc("/api/file/", s.handleFile)
+	// One table describes every endpoint and documents it; see routes.go.
+	s.api = s.routes(guard)
+	for _, rt := range s.api {
+		mux.HandleFunc(rt.Pattern, rt.serve())
+	}
 
 	var handler http.Handler = mux
 	if guard != nil {
@@ -238,29 +239,60 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func writeErr(w http.ResponseWriter, code int, err error) {
-	log.Printf("error: %v", err)
-	writeJSON(w, code, map[string]string{"error": err.Error()})
+// errorResponse is every failure this server reports, and statusMessage every
+// acknowledgement. They are types rather than literal maps because the API
+// document is generated from the types the handlers actually write.
+type errorResponse struct {
+	Error string `json:"error" doc:"what went wrong, in the same words the log gets"`
 }
 
+type statusMessage struct {
+	Status string `json:"status" doc:"what the server did"`
+}
+
+func writeErr(w http.ResponseWriter, code int, err error) {
+	log.Printf("error: %v", err)
+	writeJSON(w, code, errorResponse{Error: err.Error()})
+}
+
+// statusResponse is what a page needs before it can render: the bed it draws,
+// the resolutions it offers, where scans go, and whatever the device has to say
+// for itself.
+type statusResponse struct {
+	Backend     string  `json:"backend" doc:"which driver this build talks to the scanner through"`
+	BedWidthMm  float64 `json:"bedWidthMm" doc:"scannable width of the platen, in millimetres"`
+	BedHeightMm float64 `json:"bedHeightMm" doc:"scannable height of the platen, in millimetres"`
+	PreviewDPI  int     `json:"previewDpi" doc:"resolution previews are taken at"`
+	ScanDPI     int     `json:"scanDpi" doc:"resolution preselected in the scan menu"`
+	DPIOptions  []int   `json:"dpiOptions" doc:"every resolution the device accepts"`
+	OutDir      string  `json:"outDir" doc:"where finished scans are written"`
+	CanReset    bool    `json:"canReset" doc:"whether /api/reset can recover this device"`
+	Auth        bool    `json:"auth" doc:"whether this server asks for a login"`
+
+	Device   string `json:"device,omitempty" doc:"the model the scanner reports, or busy scanning"`
+	Firmware string `json:"firmware,omitempty" doc:"firmware revision the scanner reports"`
+	Warning  string `json:"warning,omitempty" doc:"a condition worth showing the user, such as a missing udev rule"`
+	Error    string `json:"error,omitempty" doc:"why the scanner could not be reached; the rest of the fields are still valid"`
+}
+
+// handleStatus answers 200 even when the device cannot be opened: the page
+// needs the bed and the resolutions to render at all, and the failure is
+// something it shows rather than something it cannot survive.
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{
-		"backend":     backendName,
-		"bedWidthMm":  float64(cx4300.BedWidth) / cx4300.Unit * 25.4,
-		"bedHeightMm": float64(cx4300.BedHeight) / cx4300.Unit * 25.4,
-		"previewDpi":  s.previewDPI,
-		"scanDpi":     s.scanDPI,
-		"dpiOptions":  cx4300.SupportedDPI,
-		"outDir":      s.out.Describe(),
-		"canReset":    false,
-		"auth":        s.authOn,
+	resp := statusResponse{
+		Backend:     backendName,
+		BedWidthMm:  float64(cx4300.BedWidth) / cx4300.Unit * 25.4,
+		BedHeightMm: float64(cx4300.BedHeight) / cx4300.Unit * 25.4,
+		PreviewDPI:  s.previewDPI,
+		ScanDPI:     s.scanDPI,
+		DPIOptions:  cx4300.SupportedDPI,
+		OutDir:      s.out.Describe(),
+		Auth:        s.authOn,
 	}
-	if warn := hubWarning(); warn != "" {
-		resp["warning"] = warn
-	}
+	resp.Warning = hubWarning()
 
 	if !s.scanMu.TryLock() {
-		resp["device"] = "busy scanning"
+		resp.Device = "busy scanning"
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -268,32 +300,32 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	sc, err := cx4300.Open()
 	if err != nil {
-		resp["error"] = err.Error()
+		resp.Error = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	defer sc.Close()
 	if _, ok := sc.(cx4300.Resetter); ok {
-		resp["canReset"] = true
+		resp.CanReset = true
 	}
 	info, err := sc.Identify()
 	if err != nil {
-		resp["error"] = err.Error()
+		resp.Error = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	resp["device"] = info.Model
-	resp["firmware"] = info.Firmware
+	resp.Device = info.Model
+	resp.Firmware = info.Firmware
 	writeJSON(w, http.StatusOK, resp)
 }
 
 type scanRequest struct {
-	DPI  int  `json:"dpi"`
-	X    int  `json:"x"`
-	Y    int  `json:"y"`
-	W    int  `json:"w"`
-	H    int  `json:"h"`
-	Full bool `json:"full"`
+	DPI  int  `json:"dpi" doc:"resolution; one of dpiOptions from /api/status. 0 takes this server's default"`
+	X    int  `json:"x" doc:"left edge of the area to scan, in units of 1/600 inch from the top left of the platen"`
+	Y    int  `json:"y" doc:"top edge, in units of 1/600 inch"`
+	W    int  `json:"w" doc:"width, in units of 1/600 inch"`
+	H    int  `json:"h" doc:"height, in units of 1/600 inch"`
+	Full bool `json:"full" doc:"scan the whole bed and ignore the rectangle"`
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +385,7 @@ func (s *server) start(w http.ResponseWriter, p cx4300.Params, kind string, maxE
 		defer s.setBusy(false)
 		s.run(p, kind, maxEdge)
 	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started"})
+	writeJSON(w, http.StatusAccepted, statusMessage{Status: "started"})
 }
 
 // run performs one scan. A scan - as opposed to a preview - is saved to disk at
@@ -457,10 +489,10 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 // released; the scanner finishes quietly, and the stage says so.
 func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if !s.stopScan() {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "nothing to stop"})
+		writeJSON(w, http.StatusOK, statusMessage{Status: "nothing to stop"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+	writeJSON(w, http.StatusOK, statusMessage{Status: "stopping"})
 }
 
 // stage describes what the device is doing, which is not quite the same as what
@@ -518,7 +550,7 @@ func (s *server) handleSelection(w http.ResponseWriter, r *http.Request) {
 		sel = nil
 	}
 	s.hub.change(func() { s.hub.snap.Sel = sel })
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, statusMessage{Status: "ok"})
 }
 
 // shrink scales img down so its longest edge is at most maxEdge, averaging the
@@ -627,5 +659,5 @@ func (s *server) handleReset(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
+	writeJSON(w, http.StatusOK, statusMessage{Status: "reset"})
 }

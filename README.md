@@ -104,6 +104,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 escan
 ```
 
+### The HTTP interface
+
+Everything the page does, a script can do. `http://127.0.0.1:8080/docs` lists
+every endpoint with its body, its answers and a `curl` line for each, and
+`/api/openapi.json` is the same thing as a machine-readable document. Both are
+generated from the table escan registers its own endpoints from, so they
+describe the build that is serving them.
+
 ### Running it as a service
 
 Optional - it is a foreground program by default. Pass the flag and it keeps
@@ -189,7 +197,8 @@ for a year.
 - **Scripts can use it too.** `POST /api/login` with
   `{"user":..., "password":...}` returns both tokens as JSON; send the access
   token as `Authorization: Bearer`, and trade the refresh token for a new pair
-  at `POST /api/refresh` when it expires.
+  at `POST /api/refresh` when it expires. `/docs` marks which endpoints are
+  reachable without one.
 - **This is not a substitute for TLS.** The cookies are not `Secure`, because
   escan is normally reached over plain HTTP on a LAN. Put it behind a reverse
   proxy with a certificate if it crosses anything less trusted than that.

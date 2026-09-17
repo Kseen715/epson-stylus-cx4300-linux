@@ -37,10 +37,10 @@ const heartbeatEvery = 25 * time.Second
 // area is the platen rectangle as the page sees it, in the device's 1/600 inch
 // units. cx4300.Area is the same rectangle without the JSON names.
 type area struct {
-	X int `json:"x"`
-	Y int `json:"y"`
-	W int `json:"w"`
-	H int `json:"h"`
+	X int `json:"x" doc:"left edge, in units of 1/600 inch from the top left of the platen"`
+	Y int `json:"y" doc:"top edge, in units of 1/600 inch"`
+	W int `json:"w" doc:"width, in units of 1/600 inch"`
+	H int `json:"h" doc:"height, in units of 1/600 inch"`
 }
 
 func fromArea(a cx4300.Area) area { return area{X: a.X, Y: a.Y, W: a.W, H: a.H} }
@@ -50,37 +50,37 @@ func fromArea(a cx4300.Area) area { return area{X: a.X, Y: a.Y, W: a.W, H: a.H} 
 // so a browser knows from the snapshot alone whether it is holding the current
 // one, and the fetch can be cached forever.
 type imageInfo struct {
-	ID        string `json:"id"`
-	W         int    `json:"w"`
-	H         int    `json:"h"`
-	FullW     int    `json:"fullW"`
-	FullH     int    `json:"fullH"`
-	DPI       int    `json:"dpi"`
-	ElapsedMs int64  `json:"elapsedMs"`
+	ID        string `json:"id" doc:"fetch the displayed copy at /api/image/{id}; never reused, so cacheable for good"`
+	W         int    `json:"w" doc:"width of the displayed copy, in pixels"`
+	H         int    `json:"h" doc:"height of the displayed copy, in pixels"`
+	FullW     int    `json:"fullW" doc:"width of the scan as the device produced it, in pixels"`
+	FullH     int    `json:"fullH" doc:"height of the scan as the device produced it, in pixels"`
+	DPI       int    `json:"dpi" doc:"resolution this image was scanned at"`
+	ElapsedMs int64  `json:"elapsedMs" doc:"how long the scan took, in milliseconds"`
 	// Area is what was scanned, so a selection drawn on a preview maps back to
 	// device units without assuming how much the image was shrunk.
-	Area      area   `json:"area"`
-	SavedName string `json:"savedName,omitempty"`
-	SavedPath string `json:"savedPath,omitempty"`
+	Area      area   `json:"area" doc:"the part of the platen this image covers"`
+	SavedName string `json:"savedName,omitempty" doc:"file name in the output location; fetch it at /api/file/{name}"`
+	SavedPath string `json:"savedPath,omitempty" doc:"where that file was written, as the server sees it"`
 }
 
 type snapshot struct {
-	Rev     int     `json:"rev"`
-	Busy    bool    `json:"busy"`
-	Stage   string  `json:"stage"`
-	Done    int     `json:"done"`
-	Total   int     `json:"total"`
-	Percent float64 `json:"percent"`
-	Error   string  `json:"error"`
+	Rev     int     `json:"rev" doc:"bumped on every change; a snapshot with a lower rev is stale"`
+	Busy    bool    `json:"busy" doc:"whether the scanner is working"`
+	Stage   string  `json:"stage" doc:"what it is doing, in words meant for a person"`
+	Done    int     `json:"done" doc:"rows transferred so far"`
+	Total   int     `json:"total" doc:"rows expected in total"`
+	Percent float64 `json:"percent" doc:"progress, 0 to 100"`
+	Error   string  `json:"error" doc:"why the last scan stopped; empty when nothing went wrong"`
 
-	Preview *imageInfo `json:"preview"`
-	Result  *imageInfo `json:"result"`
+	Preview *imageInfo `json:"preview" doc:"the current preview, or null"`
+	Result  *imageInfo `json:"result" doc:"the last finished scan, or null"`
 	// Last is whichever of the two was produced most recently, for the "last
 	// run" readout.
-	Last *imageInfo `json:"last"`
+	Last *imageInfo `json:"last" doc:"whichever of the two was produced most recently, or null"`
 	// Sel is the crop, shared so that dragging one out on one device moves it
 	// on all of them. Nil means the whole bed.
-	Sel *area `json:"sel"`
+	Sel *area `json:"sel" doc:"the shared crop, or null for the whole bed"`
 }
 
 type hub struct {

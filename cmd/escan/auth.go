@@ -211,28 +211,34 @@ func tokenFrom(r *http.Request, cookie string) string {
 }
 
 type loginRequest struct {
-	User     string `json:"user"`
-	Password string `json:"password"`
+	User     string `json:"user" doc:"the configured auth-user"`
+	Password string `json:"password" doc:"the configured auth-password"`
+}
+
+// tokenResponse is what a login or a refresh hands back. A browser uses the
+// cookies set alongside it and ignores this; a script sends the token as
+// Authorization: Bearer and comes back to /api/refresh with the other one.
+type tokenResponse struct {
+	Token            string `json:"token" doc:"short-lived access token, sent on every request"`
+	RefreshToken     string `json:"refreshToken" doc:"long-lived token, only accepted by /api/refresh"`
+	ExpiresIn        int    `json:"expiresIn" doc:"seconds the access token is valid for"`
+	RefreshExpiresIn int    `json:"refreshExpiresIn" doc:"seconds the refresh token is valid for"`
 }
 
 // handleLogin exchanges the configured credentials for a token. Both fields are
 // compared in constant time, and a wrong user and a wrong password are reported
 // identically, so a failure says nothing about which half was wrong.
 func (a *auth) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
-		return
-	}
 	var req loginRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "malformed request"})
 		return
 	}
 	userOK := subtle.ConstantTimeCompare([]byte(req.User), []byte(a.user))
 	passOK := subtle.ConstantTimeCompare([]byte(req.Password), []byte(a.pass))
 	if userOK&passOK != 1 {
 		time.Sleep(loginDelay)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "wrong user name or password"})
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "wrong user name or password"})
 		return
 	}
 	access, refresh, err := a.setTokens(w, time.Now())
@@ -240,11 +246,11 @@ func (a *auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"token":            access,
-		"refreshToken":     refresh,
-		"expiresIn":        int(a.ttl / time.Second),
-		"refreshExpiresIn": int(a.refreshTTL / time.Second),
+	writeJSON(w, http.StatusOK, tokenResponse{
+		Token:            access,
+		RefreshToken:     refresh,
+		ExpiresIn:        int(a.ttl / time.Second),
+		RefreshExpiresIn: int(a.refreshTTL / time.Second),
 	})
 }
 
@@ -260,7 +266,7 @@ func (a *auth) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		token = tokenFrom(r, refreshCookie)
 	}
 	if err := a.verify(token, refreshKind, time.Now()); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: err.Error()})
 		return
 	}
 	access, refresh, err := a.setTokens(w, time.Now())
@@ -268,11 +274,11 @@ func (a *auth) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"token":            access,
-		"refreshToken":     refresh,
-		"expiresIn":        int(a.ttl / time.Second),
-		"refreshExpiresIn": int(a.refreshTTL / time.Second),
+	writeJSON(w, http.StatusOK, tokenResponse{
+		Token:            access,
+		RefreshToken:     refresh,
+		ExpiresIn:        int(a.ttl / time.Second),
+		RefreshExpiresIn: int(a.refreshTTL / time.Second),
 	})
 }
 
@@ -283,7 +289,7 @@ func (a *auth) handleLogout(w http.ResponseWriter, r *http.Request) {
 			HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+	writeJSON(w, http.StatusOK, statusMessage{Status: "logged out"})
 }
 
 // openPaths are reachable without a token: the login page, the endpoint it
@@ -318,7 +324,7 @@ func (a *auth) guard(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+				writeJSON(w, http.StatusUnauthorized, errorResponse{Error: err.Error()})
 				return
 			}
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
