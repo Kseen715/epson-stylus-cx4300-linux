@@ -153,27 +153,37 @@ func TestGammaTable(t *testing.T) {
 }
 
 func TestPlaneStride(t *testing.T) {
-	// Every case below was measured against the device. 1666 is the important
-	// one: it is the only width here that distinguishes padding to 16 from
+	// Every case below was measured against the device by dumping the raw wire
+	// data and recovering its line period. 1666 is the important one at 300
+	// dpi: it is the only width there that distinguishes padding to 16 from
 	// padding to 32 or 64, and it is what caught the bug that a 32-pixel rule
-	// shears cropped scans.
-	for _, tc := range []struct{ in, want int }{
-		{1275, 1280}, // 150 dpi full bed
-		{637, 640},   // 75 dpi full bed
-		{1460, 1472}, // 300 dpi crop
-		{1666, 1680}, // 300 dpi crop; 32-rule would say 1696, 64-rule 1728
-		{2550, 2560}, // 300 dpi full bed
-		{1680, 1680}, // already aligned
+	// shears cropped scans. The 600 dpi rows are the second measurement: that
+	// resolution, and only that one, adds a further 16-pixel block.
+	for _, tc := range []struct{ width, dpi, want int }{
+		{637, 75, 640},    // full bed
+		{427, 150, 432},   //
+		{1275, 150, 1280}, // full bed
+		{400, 300, 400},   // already aligned, and no extra block below 600 dpi
+		{427, 300, 432},   //
+		{1460, 300, 1472}, //
+		{1666, 300, 1680}, // 32-rule would say 1696, 64-rule 1728
+		{2550, 300, 2560}, // full bed
+		{400, 600, 416},   // aligned, yet still one block more
+		{427, 600, 448},   // the width from the mangled 600 dpi scan
+		{448, 600, 464},   //
+		{465, 600, 496},   // 496 is not a multiple of 32, which rules that out
+		{500, 600, 528},   //
+		{1200, 600, 1216}, // the extra block is not a small-width effect
 	} {
-		if got := PlaneStride(tc.in); got != tc.want {
-			t.Errorf("PlaneStride(%d) = %d, want %d", tc.in, got, tc.want)
+		if got := PlaneStride(tc.width, tc.dpi); got != tc.want {
+			t.Errorf("PlaneStride(%d, %d dpi) = %d, want %d", tc.width, tc.dpi, got, tc.want)
 		}
 	}
 }
 
 func TestDeinterleave(t *testing.T) {
 	const w, h = 5, 2
-	plane := PlaneStride(w) // 32
+	plane := PlaneStride(w, 300) // 32
 	raw := make([]byte, plane*3*h)
 	for y := 0; y < h; y++ {
 		o := y * plane * 3
@@ -187,7 +197,7 @@ func TestDeinterleave(t *testing.T) {
 			raw[o+x], raw[o+plane+x], raw[o+2*plane+x] = 0xff, 0xff, 0xff
 		}
 	}
-	img := Deinterleave(raw, w, h)
+	img := Deinterleave(raw, w, h, 300)
 	if got := img.Bounds(); got != image.Rect(0, 0, w, h) {
 		t.Fatalf("bounds %v, want %v", got, image.Rect(0, 0, w, h))
 	}
@@ -208,8 +218,8 @@ func TestScanSequenceAndImage(t *testing.T) {
 	area := FullBed()
 	w, h := area.Pixels(dpi)
 
-	f := &fakeScanner{wire: make([]byte, WireSize(w, h))}
-	plane := PlaneStride(w)
+	f := &fakeScanner{wire: make([]byte, WireSize(w, h, dpi))}
+	plane := PlaneStride(w, dpi)
 	for y := 0; y < h; y++ {
 		o := y * plane * 3
 		for x := 0; x < w; x++ {
@@ -234,8 +244,9 @@ func TestScanSequenceAndImage(t *testing.T) {
 	if r>>8 != 3 || g>>8 != 4 || b>>8 != 0x40 {
 		t.Errorf("pixel (3,4) = %d,%d,%d want 3,4,64", r>>8, g>>8, b>>8)
 	}
-	if lastDone != lastTotal || lastTotal != WireSize(w, h) {
-		t.Errorf("progress ended at %d/%d, want %d/%d", lastDone, lastTotal, WireSize(w, h), WireSize(w, h))
+	if lastDone != lastTotal || lastTotal != WireSize(w, h, dpi) {
+		t.Errorf("progress ended at %d/%d, want %d/%d", lastDone, lastTotal,
+			WireSize(w, h, dpi), WireSize(w, h, dpi))
 	}
 
 	// The order-sensitive parts of the sequence must all have happened.
@@ -273,13 +284,13 @@ func TestParamsValidate(t *testing.T) {
 	}
 }
 
-// ScanTo streams the same image Scan builds in memory, so a SANE frontend
+// ScanRows streams the same image Scan builds in memory, so a SANE frontend
 // reading rows as they arrive and the web UI holding the whole scan see
 // identical pixels. The interesting case is a width whose plane is padded -
 // 1666 pixels go on the wire as 1680 - since the padding columns have to be
 // dropped while the data is still arriving in blocks that do not line up with
 // rows.
-func TestScanToMatchesScan(t *testing.T) {
+func TestScanRowsMatchesScan(t *testing.T) {
 	const dpi = 300
 	area := Area{X: 0, Y: 0, W: 1666 * Unit / dpi, H: 40 * Unit / dpi}
 	w, h := area.Pixels(dpi)
@@ -287,7 +298,7 @@ func TestScanToMatchesScan(t *testing.T) {
 		t.Fatalf("test needs a 1666 pixel wide area, got %d", w)
 	}
 
-	wire := make([]byte, WireSize(w, h))
+	wire := make([]byte, WireSize(w, h, dpi))
 	for i := range wire {
 		wire[i] = byte(i * 7)
 	}
@@ -299,15 +310,19 @@ func TestScanToMatchesScan(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	gotW, gotH, err := New(&fakeScanner{wire: append([]byte(nil), wire...)}).ScanTo(p, &buf)
+	gotW, gotH, err := New(&fakeScanner{wire: append([]byte(nil), wire...)}).
+		ScanRows(p, func(_ int, row []byte) error {
+			_, err := buf.Write(row)
+			return err
+		})
 	if err != nil {
-		t.Fatalf("ScanTo: %v", err)
+		t.Fatalf("ScanRows: %v", err)
 	}
 	if gotW != w || gotH != h {
-		t.Fatalf("ScanTo reported %dx%d, want %dx%d", gotW, gotH, w, h)
+		t.Fatalf("ScanRows reported %dx%d, want %dx%d", gotW, gotH, w, h)
 	}
 	if buf.Len() != w*h*3 {
-		t.Fatalf("ScanTo wrote %d bytes, want %d", buf.Len(), w*h*3)
+		t.Fatalf("ScanRows wrote %d bytes, want %d", buf.Len(), w*h*3)
 	}
 
 	rows := buf.Bytes()

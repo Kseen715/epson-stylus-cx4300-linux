@@ -20,7 +20,6 @@ const CONFIG = {
     over: '#000000',                  // dashed line on top
     dash: [7, 5],
     widthDivisor: 700,                // line width = canvas width / this
-    tickDivisor: 90,                  // corner tick length = canvas width / this
   },
 };
 
@@ -47,6 +46,8 @@ const state = {
   drag: null,
   view: 'preview',
   busy: false,
+  liveScan: null,      // {w, h, rows} while a scan is painting itself onto the canvas
+  liveFetching: false,
 };
 
 // Every call to the server goes through here. The access token is short-lived
@@ -77,6 +78,7 @@ function setBusy(busy) {
   el('btnScanSel').disabled = busy || noSel;
   el('btnPreviewSel').disabled = busy || noSel;
   el('progressWrap').hidden = !busy;
+  el('btnStop').disabled = !busy;
   if (!busy) { el('bar').style.width = '0'; el('progressText').textContent = ''; }
 }
 
@@ -117,13 +119,13 @@ async function refreshStatus() {
 // ---------- view switching ----------
 
 function setView(name) {
-  if (name === 'preview' && !state.preview) return;
+  if (name === 'preview' && !state.preview && !state.liveScan) return;
   if (name === 'result' && !state.resultId) return;
   state.view = name;
   const isPreview = name === 'preview';
   el('canvas').hidden = !isPreview;
   el('resultImg').hidden = isPreview;
-  el('placeholder').hidden = !!(state.preview || state.resultId);
+  el('placeholder').hidden = !!(state.preview || state.resultId || state.liveScan);
   el('viewPreview').classList.toggle('active', isPreview);
   el('viewResult').classList.toggle('active', !isPreview);
   el('viewNote').textContent = isPreview
@@ -132,7 +134,7 @@ function setView(name) {
 }
 
 function refreshViewButtons() {
-  el('viewPreview').disabled = !state.preview;
+  el('viewPreview').disabled = !state.preview && !state.liveScan;
   el('viewResult').disabled = !state.resultId;
 }
 
@@ -140,6 +142,9 @@ function refreshViewButtons() {
 
 function drawStage() {
   const c = el('canvas');
+  // A scan in progress paints the canvas itself, row by row, and must not be
+  // wiped by the next progress frame.
+  if (state.liveScan) return;
   if (!state.preview) return;
   const ctx = c.getContext('2d');
   ctx.drawImage(state.preview.img, 0, 0);
@@ -163,19 +168,6 @@ function drawStage() {
   ctx.setLineDash(M.dash);
   ctx.strokeRect(x, y, w, h);
   ctx.setLineDash([]);
-
-  // Corner ticks cut at 45 degrees, matching the chamfers in the chrome.
-  const t = Math.max(6, Math.round(c.width / M.tickDivisor));
-  ctx.lineWidth = lw * 2;
-  for (const [cx, cy, sx, sy] of [
-    [x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1],
-  ]) {
-    ctx.beginPath();
-    ctx.moveTo(cx + sx * t, cy);
-    ctx.lineTo(cx, cy + sy * t);
-    ctx.strokeStyle = M.under;
-    ctx.stroke();
-  }
 }
 
 // Selection in device units, derived from the previewed area rather than from
@@ -293,6 +285,140 @@ function canvasPos(ev) {
   c.addEventListener('touchend', end);
 })();
 
+// ---------- the scan as it arrives ----------
+
+// The server streams the scan at display size while the device is still
+// scanning it, so the page fills in top to bottom instead of waiting. The
+// format is a 16-byte header - "ESCL", generation, width, height - followed by
+// bands of completed rows, each headed by its first row and row count, three
+// bytes per pixel. Everything is big-endian, which is DataView's default.
+const LIVE = { magic: 0x4553434c, header: 16, band: 8 };
+
+// What has not been scanned yet is drawn as a checkerboard, so a page that is
+// still filling in is never mistaken for a finished scan of a blank sheet -
+// which is exactly what white would look like. The squares are sized against
+// the image so they stay the same size on screen whatever the scan area, and
+// take their colours from the page palette so they follow the theme.
+const CHECKER = { divisor: 60, min: 5, max: 22, light: '--sunken', dark: '--hair' };
+
+function checkerPattern(ctx, w, h) {
+  const css = getComputedStyle(document.documentElement);
+  const colour = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+  const size = Math.min(CHECKER.max,
+    Math.max(CHECKER.min, Math.round(Math.max(w, h) / CHECKER.divisor)));
+
+  const tile = document.createElement('canvas');
+  tile.width = tile.height = size * 2;
+  const t = tile.getContext('2d');
+  t.fillStyle = colour(CHECKER.light, '#e4e4e4');
+  t.fillRect(0, 0, tile.width, tile.height);
+  t.fillStyle = colour(CHECKER.dark, '#c4c4c4');
+  t.fillRect(0, 0, size, size);
+  t.fillRect(size, size, size, size);
+  return ctx.createPattern(tile, 'repeat');
+}
+
+async function streamScanRows() {
+  if (state.liveFetching) return;
+  state.liveFetching = true;
+  try {
+    const r = await fetch('/api/live');
+    // 204 means no scan has been announced yet; 401 is handled by api() paths.
+    if (r.status !== 200 || !r.body) return;
+
+    const reader = r.body.getReader();
+    let buf = new Uint8Array(0);
+    // Reads exactly n bytes, or returns null when the stream ends - which is
+    // how the server says the scan is over.
+    const take = async (n) => {
+      while (buf.length < n) {
+        const { value, done } = await reader.read();
+        if (done) return null;
+        const next = new Uint8Array(buf.length + value.length);
+        next.set(buf);
+        next.set(value, buf.length);
+        buf = next;
+      }
+      const out = buf.slice(0, n);
+      buf = buf.slice(n);
+      return out;
+    };
+    const view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+
+    const head = await take(LIVE.header);
+    if (!head) return;
+    const hv = view(head);
+    if (hv.getUint32(0) !== LIVE.magic) return;
+    const w = hv.getUint32(8), h = hv.getUint32(12);
+    if (!w || !h) return;
+    beginScanView(w, h);
+
+    for (;;) {
+      const bh = await take(LIVE.band);
+      if (!bh) break;
+      const bv = view(bh);
+      const first = bv.getUint32(0), rows = bv.getUint32(4);
+      const pixels = await take(rows * w * 3);
+      if (!pixels) break;
+      paintScanRows(first, rows, pixels);
+    }
+  } catch (e) {
+    // A dropped stream costs the live view, nothing else: the snapshot still
+    // brings the finished image.
+  } finally {
+    state.liveFetching = false;
+    endScanView();
+  }
+}
+
+function beginScanView(w, h) {
+  const c = el('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = checkerPattern(ctx, w, h) || '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  state.liveScan = { w, h, rows: 0 };
+  setView('preview');
+  refreshViewButtons();
+}
+
+function paintScanRows(first, rows, rgb) {
+  if (!state.liveScan) return;
+  const w = state.liveScan.w;
+  const ctx = el('canvas').getContext('2d');
+  const band = ctx.createImageData(w, rows);
+  const px = band.data;
+  for (let i = 0, j = 0, n = rows * w; i < n; i++) {
+    px[i * 4 + 0] = rgb[j++];
+    px[i * 4 + 1] = rgb[j++];
+    px[i * 4 + 2] = rgb[j++];
+    px[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(band, 0, first);
+  state.liveScan.rows = first + rows;
+}
+
+// The canvas was resized to the scan while it was arriving, so put it back to
+// the preview it belongs to before anything is drawn on it again - otherwise
+// the preview is painted at its own size into a buffer sized for the scan, and
+// the crop lands nowhere near where it was drawn.
+function endScanView() {
+  state.liveScan = null;
+  refreshViewButtons();
+  const c = el('canvas');
+  if (state.preview) {
+    const img = state.preview.img;
+    if (c.width !== img.naturalWidth || c.height !== img.naturalHeight) {
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+    }
+  }
+  applySharedSelection();
+  drawStage();
+  updateReadout();
+}
+
 // ---------- the shared state ----------
 
 function setLive(live) {
@@ -308,6 +434,8 @@ function render(snap) {
   state.snap = snap;
 
   showError(snap.error || '');
+  // A scan is running - here, or on another device - so watch it arrive.
+  if (snap.busy) streamScanRows();
   syncPreview(snap);
   syncResult(snap);
   applySharedSelection();
@@ -449,6 +577,18 @@ el('btnScanSel').addEventListener('click', () => {
   const u = selectionUnits();
   if (!u) return;
   requestScan('/api/scan', { dpi: scanDpi(), ...u });
+});
+
+// Stopping drops the image; the scanner still finishes its sweep, so the page
+// stays busy until it does. The button disables itself so a second press
+// cannot read as "it did not work".
+el('btnStop').addEventListener('click', async () => {
+  el('btnStop').disabled = true;
+  try {
+    await api('/api/cancel', { method: 'POST' });
+  } catch (e) {
+    showError('could not stop the scan: ' + e.message);
+  }
 });
 
 el('btnClear').addEventListener('click', () => {

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"io"
 	"strings"
 	"time"
 )
@@ -165,7 +164,7 @@ func (d *Device) Scan(p Params) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Deinterleave(raw, width, height), nil
+	return Deinterleave(raw, width, height, p.DPI), nil
 }
 
 // ScanRaw performs one scan and returns the bytes exactly as the device sent
@@ -177,7 +176,7 @@ func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 		return nil, 0, 0, err
 	}
 	width, height = p.Area.Pixels(p.DPI)
-	raw = make([]byte, 0, WireSize(width, height))
+	raw = make([]byte, 0, WireSize(width, height, p.DPI))
 	err = d.scan(p, func(chunk []byte) error {
 		raw = append(raw, chunk...)
 		return nil
@@ -188,22 +187,25 @@ func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 	return raw, width, height, nil
 }
 
-// ScanTo performs one scan and writes it to w as the data arrives, one row of
-// 8-bit RGB triples after another, with the wire format's colour planes
-// interleaved and its padding columns removed. It returns the pixel width of a
-// row and how many rows were written, which is the requested height unless the
-// device ended the image early.
+// ScanRows performs one scan and calls fn for each row as it arrives, from the
+// top of the area down, handing it one row of 8-bit RGB triples with the wire
+// format's colour planes interleaved and its padding columns removed. The slice
+// is reused between calls, so fn must copy anything it keeps. An error from fn
+// ends the scan and is returned as it is.
 //
-// Use this rather than Scan when the image is consumed as a stream - a SANE
-// frontend, a file, a socket - so that neither the raw nor the decoded image is
-// ever held in memory in full. w must keep up: this blocks while it writes, and
-// the device tolerates the pause between image blocks.
-func (d *Device) ScanTo(p Params, w io.Writer) (width, height int, err error) {
+// It returns the pixel width of a row and how many rows were delivered, which
+// is the requested height unless the device ended the image early.
+//
+// Use this rather than Scan when the image is consumed as it arrives - a SANE
+// frontend, a browser watching a scan appear, a file - so that neither the raw
+// nor the decoded image is ever held in memory in full. fn must keep up: the
+// scan blocks while it runs, which the device tolerates between image blocks.
+func (d *Device) ScanRows(p Params, fn func(y int, row []byte) error) (width, height int, err error) {
 	if err := p.Validate(); err != nil {
 		return 0, 0, err
 	}
 	width, _ = p.Area.Pixels(p.DPI)
-	rows := newRowWriter(w, width)
+	rows := newRowSplitter(width, p.DPI, fn)
 	if err := d.scan(p, rows.write); err != nil {
 		return 0, 0, err
 	}
@@ -211,14 +213,14 @@ func (d *Device) ScanTo(p Params, w io.Writer) (width, height int, err error) {
 }
 
 // scan runs the command sequence for one scan, handing each block of image data
-// to sink as it arrives. Both ScanRaw and ScanTo are this loop with a different
+// to sink as it arrives. ScanRaw and ScanRows are this loop with a different
 // sink; nothing else should speak to the device while it runs.
 func (d *Device) scan(p Params, sink func(chunk []byte) error) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
 	width, height := p.Area.Pixels(p.DPI)
-	total := WireSize(width, height)
+	total := WireSize(width, height, p.DPI)
 
 	d.drain()
 

@@ -330,7 +330,10 @@ func sane_cx4300_start(sh C.SANE_Handle) C.SANE_Status {
 
 	s := h.stream
 	go func() {
-		_, _, err := dev.ScanTo(p, s)
+		_, _, err := dev.ScanRows(p, func(_ int, row []byte) error {
+			_, err := s.Write(row)
+			return err
+		})
 		dev.Close()
 		if err != nil {
 			warn("%v", err)

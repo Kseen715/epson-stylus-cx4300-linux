@@ -3,7 +3,6 @@ package cx4300
 import (
 	"encoding/binary"
 	"image"
-	"io"
 	"math"
 )
 
@@ -117,21 +116,38 @@ func GammaTable() []byte {
 // not "simplify" this to 32 on the strength of those.
 const planePad = 16
 
+// At 600 dpi, and only there, every plane carries one further block of
+// planePad pixels beyond that rounding. Measured at six widths: 400 -> 416,
+// 427 -> 448, 448 -> 464, 465 -> 496, 500 -> 528 and 1200 -> 1216, against
+// 400 -> 400 and 427 -> 432 at 300 dpi and 427 -> 432 at 150. The extra block
+// trails the image rather than leading it, so the pixels still start at column
+// zero: a 600 dpi scan decoded without it comes out sheared into coloured
+// stripes, which is what the padding rule is for.
+const extraPadAbove = 300
+
 // PlaneStride returns the padded width, in pixels, of one colour plane on the
-// wire. The device pads each plane up to a multiple of planePad pixels, so a
-// 1666-pixel line is sent as 1680.
-func PlaneStride(width int) int { return (width + planePad - 1) / planePad * planePad }
+// wire. The device pads each plane up to a multiple of planePad pixels - so a
+// 1666-pixel line is sent as 1680 - and adds one more block above 300 dpi.
+func PlaneStride(width, dpi int) int {
+	stride := (width + planePad - 1) / planePad * planePad
+	if dpi > extraPadAbove {
+		stride += planePad
+	}
+	return stride
+}
 
 // WireSize returns how many bytes a scan of this pixel size occupies on the
 // wire: three padded colour planes per line.
-func WireSize(width, height int) int { return PlaneStride(width) * 3 * height }
+func WireSize(width, height, dpi int) int { return PlaneStride(width, dpi) * 3 * height }
 
-// rowWriter turns the device's planar wire format into interleaved RGB rows as
-// the bytes arrive, so a scan can be streamed instead of buffered. Blocks from
-// the device do not line up with lines on the wire, so whatever is left over
-// after the last whole line is carried into the next write.
-type rowWriter struct {
-	out    io.Writer
+// rowSplitter turns the device's planar wire format into interleaved RGB rows
+// as the bytes arrive, so a scan can be streamed instead of buffered. Blocks
+// from the device do not line up with lines on the wire, so whatever is left
+// over after the last whole line is carried into the next block.
+//
+// The row it passes to emit is reused, so a consumer that keeps it must copy.
+type rowSplitter struct {
+	emit   func(y int, row []byte) error
 	width  int // pixels per row
 	plane  int // padded pixels per colour plane
 	stride int // bytes per wire line, all three planes
@@ -140,10 +156,10 @@ type rowWriter struct {
 	lines  int
 }
 
-func newRowWriter(out io.Writer, width int) *rowWriter {
-	plane := PlaneStride(width)
-	return &rowWriter{
-		out:    out,
+func newRowSplitter(width, dpi int, emit func(y int, row []byte) error) *rowSplitter {
+	plane := PlaneStride(width, dpi)
+	return &rowSplitter{
+		emit:   emit,
 		width:  width,
 		plane:  plane,
 		stride: plane * 3,
@@ -151,7 +167,7 @@ func newRowWriter(out io.Writer, width int) *rowWriter {
 	}
 }
 
-func (w *rowWriter) write(chunk []byte) error {
+func (w *rowSplitter) write(chunk []byte) error {
 	w.held = append(w.held, chunk...)
 	done := 0
 	for len(w.held)-done >= w.stride {
@@ -162,7 +178,7 @@ func (w *rowWriter) write(chunk []byte) error {
 			w.row[x*3+1] = g[x]
 			w.row[x*3+2] = b[x]
 		}
-		if _, err := w.out.Write(w.row); err != nil {
+		if err := w.emit(w.lines, w.row); err != nil {
 			return err
 		}
 		done += w.stride
@@ -175,10 +191,11 @@ func (w *rowWriter) write(chunk []byte) error {
 // Deinterleave converts the device's planar output into an image. Each scan
 // line arrives as three consecutive colour planes - the whole red row, then
 // green, then blue - each padded to PlaneStride pixels; the padding columns are
-// dropped here. Short input yields a correspondingly short image rather than an
-// error, so a partial scan is still viewable.
-func Deinterleave(raw []byte, width, height int) *image.RGBA {
-	plane := PlaneStride(width)
+// dropped here. The resolution is needed because the padding depends on it.
+// Short input yields a correspondingly short image rather than an error, so a
+// partial scan is still viewable.
+func Deinterleave(raw []byte, width, height, dpi int) *image.RGBA {
+	plane := PlaneStride(width, dpi)
 	stride := plane * 3
 	lines := height
 	if got := len(raw) / stride; got < lines {

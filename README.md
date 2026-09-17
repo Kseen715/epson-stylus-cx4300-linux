@@ -12,7 +12,7 @@ Works on Linux (direct USB) and Windows (through WIA).
 
 | Path | What it is |
 |---|---|
-| `cx4300/` | the protocol as an importable Go library |
+| `cx4300/` | the protocol as an importable Go library (`Scan`, or `ScanRows` for the image row by row as it arrives) |
 | `cmd/escan/` | web UI: preview, crop, scan |
 | `cmd/libsane-cx4300/` | SANE backend, so XSane, GIMP, simple-scan and `scanimage` work |
 | `install.sh` / `install.ps1` | installers (`--service` / `-Service` also runs it in the background) |
@@ -32,8 +32,10 @@ know it is reachable before starting.
 
 ![Empty](image/01-empty.png)
 
-**Preview running.** Progress is reported in megabytes as the data arrives; a
-75 dpi full bed takes about 8 seconds.
+**Preview running.** The image is drawn row by row as the carriage moves: the
+server streams it at display size while the device is still scanning. Progress
+is reported in megabytes as the data arrives; a 75 dpi full bed takes about 8
+seconds.
 
 ![Preview running](image/02-preview-running.png)
 
@@ -47,8 +49,11 @@ resolution, and its origin on the glass.
 
 ![Selection](image/04-selection.png)
 
-**Scan running.** The preview and the selection stay put while the scan runs, so
-the area can be adjusted and re-scanned without previewing again.
+**Scan running.** The scan appears as it is made, and the selection stays put,
+so the area can be adjusted and re-scanned without previewing again. What is
+drawn while scanning is pixel for pixel what replaces it at the end - both are
+the same integer box average of the full-resolution image, which is saved to
+disk at full size regardless.
 
 ![Scan running](image/05-scan-running.png)
 
@@ -282,14 +287,16 @@ use the scanner again.
 ## Status and limitations
 
 Verified on both platforms against real hardware: identify, 75 dpi preview,
-cropped scans at 300 dpi and full-bed scans at 150 dpi. Linux and Windows
-produce the same framing and the same output dimensions. The plane padding rule
-(a multiple of 16 pixels) was measured from raw wire data at five different
-widths, including a crop width that distinguishes it from 32 and 64 - see
-[PROTOCOL.md](PROTOCOL.md).
+cropped scans at 300 and 600 dpi and full-bed scans at 150 dpi, through the web
+UI and through SANE. Linux and Windows produce the same framing and the same
+output dimensions. The plane padding rule was measured from raw wire data at
+fourteen width/resolution combinations - including the width that tells a
+16-pixel rule apart from 32 and 64, and the six that establish the extra block
+600 dpi adds - see [PROTOCOL.md](PROTOCOL.md).
 
-Not verified: 600 dpi. It should work, but a full-bed 600 dpi scan is ~107 MB
-over this device's USB 1.1 link, so time it before assuming a timeout is a bug.
+Not timed: a 600 dpi **full bed**, which is ~107 MB over this device's USB 1.1
+link. Crops at 600 dpi are verified; give a full bed several minutes before
+assuming a timeout is a bug.
 
 The SANE backend is a cgo shared library, so releases carry one only for the
 architectures the build has a C compiler for (x86_64 and aarch64); on any other

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -88,10 +91,26 @@ type hub struct {
 	png    map[string][]byte
 	imgSeq int
 	subs   map[chan []byte]struct{}
+	// run distinguishes this process's image ids from those of any earlier
+	// one. See newRunID.
+	run string
 }
 
 func newHub() *hub {
-	return &hub{png: map[string][]byte{}, subs: map[chan []byte]struct{}{}}
+	return &hub{png: map[string][]byte{}, subs: map[chan []byte]struct{}{}, run: newRunID()}
+}
+
+// newRunID returns a token unique to this process, which goes into every image
+// id. Without it a restarted server starts counting from one again and mints
+// "preview-1.png" a second time - and since those ids are served as immutable
+// and cached by the browser for a year, the page would answer a fresh preview
+// with the picture from the previous run.
+func newRunID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // change runs fn with the hub locked, then bumps the revision and sends the new
@@ -140,7 +159,7 @@ func send(c chan []byte, msg []byte) {
 // of that kind was there before. Call it from inside change.
 func (h *hub) publish(kind string, data []byte, info imageInfo) {
 	h.imgSeq++
-	info.ID = fmt.Sprintf("%s-%d.png", kind, h.imgSeq)
+	info.ID = fmt.Sprintf("%s-%s-%d.png", kind, h.run, h.imgSeq)
 
 	slot := &h.snap.Result
 	if kind == "preview" {

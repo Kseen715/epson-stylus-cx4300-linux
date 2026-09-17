@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Kseen715/epson-stylus-cx4300-linux/cx4300"
@@ -57,9 +58,16 @@ type server struct {
 	// last scan - and pushes it out as it changes.
 	hub *hub
 
+	// live carries the scan in progress, row by row, to any browser watching.
+	live *live
+
 	// scanMu serialises device access. Two concurrent scans wedge this
 	// scanner, so every request that touches it holds this lock.
 	scanMu sync.Mutex
+
+	// stop is raised by /api/cancel and read by the scan in progress. It only
+	// stops the image being kept, never the transfer: see run.
+	stop atomic.Bool
 }
 
 func main() {
@@ -120,6 +128,7 @@ func main() {
 	}
 	s := &server{
 		hub:        newHub(),
+		live:       newLive(),
 		out:        dest,
 		previewDPI: *previewDPI,
 		scanDPI:    *scanDPI,
@@ -142,7 +151,11 @@ func main() {
 		log.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	// The page and its script are embedded in the binary, which gives them no
+	// modification time for a browser to revalidate against - so ask for no
+	// caching at all. They are a few kilobytes, and the alternative is a
+	// browser quietly running the previous version's script after an upgrade.
+	mux.Handle("/", noCache(http.FileServer(http.FS(sub))))
 	if guard != nil {
 		// /login is the same file the static server would hand out at
 		// /login.html; naming it here keeps the address in the redirect, in the
@@ -157,7 +170,9 @@ func main() {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/preview", s.handlePreview)
 	mux.HandleFunc("/api/scan", s.handleScan)
+	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/events", s.hub.handleEvents)
+	mux.HandleFunc("/api/live", s.handleLive)
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/selection", s.handleSelection)
 	mux.HandleFunc("/api/image/", s.handleImage)
@@ -184,6 +199,14 @@ func main() {
 	log.Printf("scans will be written to %s", s.out.Describe())
 	log.Printf("open http://%s/", *addr)
 	log.Fatal(srv.ListenAndServe())
+}
+
+// noCache stops a browser holding on to the embedded page and script.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) setProgress(done, total int, stage string) {
@@ -314,6 +337,11 @@ func (s *server) start(w http.ResponseWriter, p cx4300.Params, kind string, maxE
 		writeErr(w, http.StatusConflict, fmt.Errorf("a scan is already running"))
 		return
 	}
+	s.stop.Store(false)
+	// Announced here rather than when the device answers, so a browser that
+	// asks for the stream the moment it sees "busy" finds it waiting.
+	fullW, fullH := p.Area.Pixels(p.DPI)
+	s.live.start(fullW, fullH, maxEdge)
 	s.hub.change(func() {
 		s.hub.snap.Busy = true
 		s.hub.snap.Error = ""
@@ -332,6 +360,8 @@ func (s *server) start(w http.ResponseWriter, p cx4300.Params, kind string, maxE
 // full resolution; the copy the browsers display is shrunk to maxEdge so a page
 // on a phone is not asked to hold a 600 dpi full-bed image.
 func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
+	defer s.live.finish()
+
 	sc, err := cx4300.Open()
 	if err != nil {
 		s.fail(err)
@@ -349,18 +379,38 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 				return
 			}
 			last = now
-			s.setProgress(done, total, "scanning")
+			s.setProgress(done, total, s.stage())
 		})
 	}
-	s.setProgress(0, 0, "scanning")
+	s.setProgress(0, 0, s.stage())
 
 	started := time.Now()
-	img, err := sc.Scan(p)
+	var img image.Image
+	if st, ok := sc.(cx4300.StreamScanner); ok {
+		// Linux: the rows reach the browsers as they are scanned.
+		img, err = scanStreaming(st, p, s.live, s.stop.Load)
+	} else {
+		// Windows/WIA hands over a finished image, so there is nothing to
+		// watch; the progress readout is all a browser gets.
+		s.live.finish()
+		img, err = sc.Scan(p)
+	}
 	if err != nil {
 		s.fail(err)
 		return
 	}
 	elapsed := time.Since(started)
+	// End the live stream before the finished image is published, so a page
+	// puts its canvas back to the preview first and the new image is the last
+	// thing drawn on it rather than the first.
+	s.live.finish()
+
+	if s.stop.Load() {
+		// Nothing is saved or published: what was asked for was not produced.
+		// The sweep itself has already run to its end - see handleCancel.
+		s.hub.change(func() { s.hub.snap.Error = "scan stopped" })
+		return
+	}
 
 	s.setProgress(1, 1, "encoding")
 	full := img.Bounds()
@@ -396,6 +446,46 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 			s.hub.snap.Sel = nil
 		}
 	})
+}
+
+// handleCancel stops the scan in progress - as far as this device allows.
+//
+// The transfer is deliberately left to run to its end: this scanner locks up
+// until its mains lead is pulled if it is abandoned part way through one, and a
+// lock-up costs the user far more than the half minute of carriage sweep they
+// asked to skip. So stopping means the image is dropped and the page is
+// released; the scanner finishes quietly, and the stage says so.
+func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.stopScan() {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "nothing to stop"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+}
+
+// stage describes what the device is doing, which is not quite the same as what
+// the user asked for: after a stop it keeps scanning, and saying so is the only
+// way the wait makes sense to whoever pressed the button.
+func (s *server) stage() string {
+	if s.stop.Load() {
+		return "stopping - the scanner finishes its sweep"
+	}
+	return "scanning"
+}
+
+// stopScan raises the stop flag if a scan is running, and reports whether it
+// did. The live view is ended at once, so the page stops drawing rows it is
+// not going to keep.
+func (s *server) stopScan() bool {
+	if !s.hub.state().Busy {
+		return false
+	}
+	if s.stop.Swap(true) {
+		return false // already stopping
+	}
+	s.live.finish()
+	s.setProgress(0, 0, s.stage())
+	return true
 }
 
 func (s *server) handleState(w http.ResponseWriter, r *http.Request) {

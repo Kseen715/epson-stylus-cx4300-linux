@@ -117,6 +117,14 @@ type Transport interface {
 // ProgressFunc is called during a scan as image data arrives.
 type ProgressFunc func(done, total int)
 
+// StreamScanner is implemented by backends that can deliver an image row by
+// row as it is scanned, rather than only when it is complete. Only the Linux
+// backend can: WIA hands over a finished file, so on Windows a caller has to
+// wait for the whole scan. See Device.ScanRows.
+type StreamScanner interface {
+	ScanRows(p Params, fn func(y int, row []byte) error) (width, height int, err error)
+}
+
 // ProgressReporter is implemented by backends that can report scan progress.
 // The Linux backend reports byte counts as image blocks arrive; the Windows WIA
 // backend cannot see inside a transfer, so it only reports start and finish.

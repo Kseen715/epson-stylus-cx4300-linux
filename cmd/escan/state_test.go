@@ -122,3 +122,21 @@ func TestSelectionIsShared(t *testing.T) {
 		t.Errorf("selection %+v after clearing, want none", got)
 	}
 }
+
+// A restarted server must never mint an image id an earlier run already used:
+// those ids are served to the browser as immutable and cached for a year, so a
+// repeated id shows the previous run's picture in place of the new scan.
+func TestImageIDsDifferBetweenRuns(t *testing.T) {
+	first, second := newHub(), newHub()
+	ids := map[string]bool{}
+	for _, h := range []*hub{first, second} {
+		for i := 0; i < 3; i++ {
+			h.change(func() { h.publish("preview", []byte{1}, imageInfo{}) })
+			id := h.state().Preview.ID
+			if ids[id] {
+				t.Fatalf("image id %q was minted twice", id)
+			}
+			ids[id] = true
+		}
+	}
+}

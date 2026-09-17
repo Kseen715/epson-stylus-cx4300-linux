@@ -240,7 +240,13 @@
     </p>
     <div id="progressWrap" hidden style="margin-top:12px">
       <div class="bar"><i id="bar"></i></div>
-      <p class="muted mono" id="progressText" style="margin:6px 0 0;font-size:11px"></p>
+      <div class="row" style="align-items:center;gap:10px;margin-top:6px">
+        <p class="muted mono" id="progressText" style="margin:0;font-size:11px;flex:1 1 auto"></p>
+        <!-- The scanner is left to finish its sweep either way; stopping
+             discards the image rather than cutting the transfer short, which
+             would lock the device up until its mains lead is pulled. -->
+        <button id="btnStop" title="Discard this scan; the scanner finishes its sweep">Stop</button>
+      </div>
     </div>
   </div>
 

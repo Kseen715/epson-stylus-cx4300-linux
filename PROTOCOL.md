@@ -101,21 +101,45 @@ Total bytes for a full-bed 150 dpi scan are therefore `1280 * 3 * 1755 =
 6,739,200`, not `1275 * 1755 * 3`. Reading the smaller figure silently truncates
 the last few lines.
 
+**At 600 dpi, and only there, every plane carries one further 16-pixel block on
+top of that rounding.** A 427-pixel line is sent as 432 at 300 dpi but as 448 at
+600. The extra block trails the image, so the pixels still begin at column zero;
+decoding a 600 dpi scan without it shears the image into coloured stripes.
+
 Measured plane widths:
 
 | Pixel width | Plane on the wire | Scan |
 |---|---|---|
 | 637 | 640 | 75 dpi full bed |
+| 427 | 432 | 150 dpi crop |
 | 1275 | 1280 | 150 dpi full bed |
+| 400 | 400 | 300 dpi crop, already aligned |
+| 427 | 432 | 300 dpi crop |
 | 1460 | 1472 | 300 dpi crop |
 | 1666 | **1680** | 300 dpi crop |
 | 2550 | 2560 | 300 dpi full bed |
+| 400 | **416** | 600 dpi crop, aligned yet padded anyway |
+| 427 | **448** | 600 dpi crop |
+| 448 | **464** | 600 dpi crop |
+| 465 | **496** | 600 dpi crop |
+| 500 | **528** | 600 dpi crop |
+| 1200 | **1216** | 600 dpi crop |
 
-The 16 is load-bearing and was measured, not inferred. Every width except 1666
-pads identically under a 16-, 32- or 64-pixel rule, so those cases cannot tell
-the rules apart; 1666 can, and it pads to 1680. Assuming 32 there leaves each
-line 96 bytes short and shears the image progressively, while assuming 64 asks
-the device for more data than it has and wedges it until mains power is cut.
+The 16 is load-bearing and was measured, not inferred. Every width below 600 dpi
+except 1666 pads identically under a 16-, 32- or 64-pixel rule, so those cases
+cannot tell the rules apart; 1666 can, and it pads to 1680. Assuming 32 there
+leaves each line 96 bytes short and shears the image progressively, while
+assuming 64 asks the device for more data than it has and wedges it until mains
+power is cut.
+
+The 600 dpi rows rule out the obvious alternatives too: 465 pads to 496, which
+is not a multiple of 32 or 64, and 400 and 448 are already multiples of 16 yet
+still gain a block - so this is an extra block, not a coarser alignment. 1200
+shows it is not an effect of small widths.
+
+All of these were measured the same way: dump the bytes a scan actually returns
+and recover the line period from them, by finding the byte offset at which the
+buffer best correlates with itself. The period is the plane width times three.
 
 Because the expected total depends on this, treat a `READ` that returns fewer
 bytes than requested as end-of-image and stop: issuing another `READ` leaves the
