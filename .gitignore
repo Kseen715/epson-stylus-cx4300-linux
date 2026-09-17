@@ -6,3 +6,8 @@
 cx4300-*.png
 image/raw/
 libsane-cx4300.so.*
+/wirediag
+*.raw
+band*.png
+hdr*.png
+wirediag*.png

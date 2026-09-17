@@ -190,7 +190,7 @@ func TestDeinterleave(t *testing.T) {
 		for x := 0; x < w; x++ {
 			raw[o+x] = byte(10 + x)          // red plane
 			raw[o+plane+x] = byte(100 + x)   // green plane
-			raw[o+2*plane+x] = byte(200 + y) // blue plane
+			raw[o+2*plane+x] = byte(200 + x) // blue plane
 		}
 		// Padding columns carry junk that must not reach the image.
 		for x := w; x < plane; x++ {
@@ -204,10 +204,54 @@ func TestDeinterleave(t *testing.T) {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
-			wantR, wantG, wantB := uint32(10+x), uint32(100+x), uint32(200+y)
+			wantR, wantG, wantB := uint32(10+x), uint32(100+x), uint32(200+x)
 			if r>>8 != wantR || g>>8 != wantG || b>>8 != wantB || a>>8 != 0xff {
 				t.Fatalf("pixel (%d,%d) = %d,%d,%d,%d want %d,%d,%d,255",
 					x, y, r>>8, g>>8, b>>8, a>>8, wantR, wantG, wantB)
+			}
+		}
+	}
+}
+
+// The row splitter carries one line of history, so a plane cannot be allowed to
+// trail by a whole line or more.
+func TestPlaneRowLag(t *testing.T) {
+	if planeRowLag[0] != 0 {
+		t.Errorf("red is the reference plane, its lag must be 0, got %v", planeRowLag[0])
+	}
+	for i, lag := range planeRowLag {
+		if lag < 0 || lag >= 1 {
+			t.Errorf("plane %d lag %v is outside [0,1) - the row splitter keeps only one line", i, lag)
+		}
+	}
+}
+
+// A page whose brightness ramps down the image, sampled by planes that trail
+// red by planeRowLag, must decode back to three channels that agree: that is
+// what the resample is for. The first row is excluded because it has no line
+// above it to mix.
+func TestDeinterleaveCorrectsPlaneLag(t *testing.T) {
+	const w, h, dpi = 4, 12, 300
+	plane := PlaneStride(w, dpi)
+	content := func(y float64) byte { return byte(20 + 10*y) }
+	raw := make([]byte, plane*3*h)
+	for y := 0; y < h; y++ {
+		for c := 0; c < 3; c++ {
+			for x := 0; x < w; x++ {
+				raw[y*plane*3+c*plane+x] = content(float64(y) + planeRowLag[c])
+			}
+		}
+	}
+	img := Deinterleave(raw, w, h, dpi)
+	for y := 1; y < h; y++ {
+		for x := 0; x < w; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			want := uint32(content(float64(y)))
+			for i, got := range []uint32{r >> 8, g >> 8, b >> 8} {
+				if diff := int(got) - int(want); diff < -1 || diff > 1 {
+					t.Fatalf("pixel (%d,%d) channel %d = %d, want %d: plane lag not corrected",
+						x, y, i, got, want)
+				}
 			}
 		}
 	}

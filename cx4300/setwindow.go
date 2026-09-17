@@ -140,6 +140,58 @@ func PlaneStride(width, dpi int) int {
 // wire: three padded colour planes per line.
 func WireSize(width, height, dpi int) int { return PlaneStride(width, dpi) * 3 * height }
 
+// planeRowLag is how far each colour plane trails the red one, in wire lines.
+//
+// Measured, not guessed: the device hands all three planes of a line together,
+// but green and blue do not describe the same row of the page as red, so a grey
+// printed dither sampled through them comes out with a hue that rotates across
+// the page, and horizontal edges get a colour fringe.
+//
+// From two captures of the same document, a table with rules and text at 300
+// and at 600 dpi, aligning each plane's differenced row means against red's:
+//
+//	          300 dpi   600 dpi
+//	green      0.15      0.18
+//	blue       0.85      0.95
+//
+// The lag is in lines, not inches - a sensor with its three rows physically
+// apart would double from 300 to 600 dpi, and this does not - so it is applied
+// per line at every resolution rather than scaled.
+var planeRowLag = [3]float64{0, 0.17, 0.90}
+
+// planeLagWeight is planeRowLag as the 1/256 share of the previous wire line to
+// mix into each plane, so the resample stays integer. The row splitter keeps
+// one line of history, so every lag must be under one line; TestPlaneRowLag
+// holds that invariant.
+var planeLagWeight = func() [3]int {
+	var w [3]int
+	for i, lag := range planeRowLag {
+		w[i] = int(math.Round(lag * 256))
+	}
+	return w
+}()
+
+// interleavePlanes writes one output row: the three colour planes of cur,
+// interleaved into dst at pixStride bytes per pixel, each resampled to red's
+// row by mixing in the plane's share of the previous wire line. For the first
+// line of an image, pass cur as prev - there is nothing above it to mix.
+func interleavePlanes(dst []byte, pixStride int, cur, prev []byte, plane, width int) {
+	for c := 0; c < 3; c++ {
+		wPrev := planeLagWeight[c]
+		src := cur[c*plane:]
+		if wPrev == 0 {
+			for x := 0; x < width; x++ {
+				dst[x*pixStride+c] = src[x]
+			}
+			continue
+		}
+		wCur, above := 256-wPrev, prev[c*plane:]
+		for x := 0; x < width; x++ {
+			dst[x*pixStride+c] = byte((wCur*int(src[x]) + wPrev*int(above[x]) + 128) >> 8)
+		}
+	}
+}
+
 // rowSplitter turns the device's planar wire format into interleaved RGB rows
 // as the bytes arrive, so a scan can be streamed instead of buffered. Blocks
 // from the device do not line up with lines on the wire, so whatever is left
@@ -152,6 +204,7 @@ type rowSplitter struct {
 	plane  int // padded pixels per colour plane
 	stride int // bytes per wire line, all three planes
 	held   []byte
+	prev   []byte // previous whole wire line, for the planeRowLag resample
 	row    []byte
 	lines  int
 }
@@ -172,15 +225,15 @@ func (w *rowSplitter) write(chunk []byte) error {
 	done := 0
 	for len(w.held)-done >= w.stride {
 		line := w.held[done : done+w.stride]
-		g, b := line[w.plane:], line[2*w.plane:]
-		for x := 0; x < w.width; x++ {
-			w.row[x*3+0] = line[x]
-			w.row[x*3+1] = g[x]
-			w.row[x*3+2] = b[x]
+		above := line
+		if w.lines > 0 {
+			above = w.prev
 		}
+		interleavePlanes(w.row, 3, line, above, w.plane, w.width)
 		if err := w.emit(w.lines, w.row); err != nil {
 			return err
 		}
+		w.prev = append(w.prev[:0], line...)
 		done += w.stride
 		w.lines++
 	}
@@ -191,7 +244,7 @@ func (w *rowSplitter) write(chunk []byte) error {
 // Deinterleave converts the device's planar output into an image. Each scan
 // line arrives as three consecutive colour planes - the whole red row, then
 // green, then blue - each padded to PlaneStride pixels; the padding columns are
-// dropped here. The resolution is needed because the padding depends on it.
+// dropped here and each plane is resampled to red's row by planeRowLag. The resolution is needed because the padding depends on it.
 // Short input yields a correspondingly short image rather than an error, so a
 // partial scan is still viewable.
 func Deinterleave(raw []byte, width, height, dpi int) *image.RGBA {
@@ -203,15 +256,14 @@ func Deinterleave(raw []byte, width, height, dpi int) *image.RGBA {
 	}
 	img := image.NewRGBA(image.Rect(0, 0, width, lines))
 	for y := 0; y < lines; y++ {
-		o := y * stride
-		r := raw[o : o+plane]
-		g := raw[o+plane : o+2*plane]
-		b := raw[o+2*plane : o+3*plane]
+		cur := raw[y*stride : y*stride+stride]
+		above := cur
+		if y > 0 {
+			above = raw[(y-1)*stride : y*stride]
+		}
 		row := img.Pix[y*img.Stride:]
+		interleavePlanes(row, 4, cur, above, plane, width)
 		for x := 0; x < width; x++ {
-			row[x*4+0] = r[x]
-			row[x*4+1] = g[x]
-			row[x*4+2] = b[x]
 			row[x*4+3] = 0xff
 		}
 	}
