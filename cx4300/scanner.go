@@ -39,6 +39,40 @@ const (
 // rejected by Params.Validate rather than silently rounded.
 var SupportedDPI = []int{75, 150, 300, 600}
 
+// Mode is the pixel format a scan is delivered in.
+//
+// The device itself only ever scans 24-bit colour - its SET WINDOW block asks
+// for image composition 0x05 and the firmware offers no grayscale composition
+// this driver has been able to get an image out of - so ModeGray is computed
+// here from the colour the device sends, not requested from it. It still earns
+// its place: a grey page scanned in colour carries the three channels' noise
+// and any misregistration left between them as visible colour speckle, and the
+// luma average cancels most of both. It is also a third of the bytes to the
+// frontend, though not over the wire.
+type Mode int
+
+const (
+	// ModeColor delivers 8-bit RGB, three bytes per pixel.
+	ModeColor Mode = iota
+	// ModeGray delivers 8-bit luma, one byte per pixel.
+	ModeGray
+)
+
+// BytesPerPixel is how wide one pixel is in the delivered image.
+func (m Mode) BytesPerPixel() int {
+	if m == ModeGray {
+		return 1
+	}
+	return 3
+}
+
+func (m Mode) String() string {
+	if m == ModeGray {
+		return "gray"
+	}
+	return "color"
+}
+
 // Area is a rectangle on the platen in 1/600 inch units.
 type Area struct {
 	X, Y, W, H int
@@ -62,6 +96,7 @@ func (a Area) Millimetres() (w, h float64) {
 type Params struct {
 	DPI  int
 	Area Area
+	Mode Mode
 }
 
 // Validate reports whether the parameters are usable, so callers get a clear
@@ -86,6 +121,9 @@ func (p Params) Validate() error {
 	}
 	if w, h := a.Pixels(p.DPI); w == 0 || h == 0 {
 		return fmt.Errorf("cx4300: area %+v is smaller than one pixel at %d dpi", a, p.DPI)
+	}
+	if p.Mode != ModeColor && p.Mode != ModeGray {
+		return fmt.Errorf("cx4300: unknown mode %d", int(p.Mode))
 	}
 	return nil
 }

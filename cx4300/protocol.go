@@ -164,7 +164,7 @@ func (d *Device) Scan(p Params) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Deinterleave(raw, width, height, p.DPI), nil
+	return Deinterleave(raw, width, height, p.DPI, p.Mode), nil
 }
 
 // ScanRaw performs one scan and returns the bytes exactly as the device sent
@@ -188,8 +188,9 @@ func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 }
 
 // ScanRows performs one scan and calls fn for each row as it arrives, from the
-// top of the area down, handing it one row of 8-bit RGB triples with the wire
-// format's colour planes interleaved and its padding columns removed. The slice
+// top of the area down, handing it one row of p.Mode.BytesPerPixel() bytes per
+// pixel - 8-bit RGB triples, or one luma byte - with the wire format's colour
+// planes resampled and interleaved and its padding columns removed. The slice
 // is reused between calls, so fn must copy anything it keeps. An error from fn
 // ends the scan and is returned as it is.
 //
@@ -205,7 +206,7 @@ func (d *Device) ScanRows(p Params, fn func(y int, row []byte) error) (width, he
 		return 0, 0, err
 	}
 	width, _ = p.Area.Pixels(p.DPI)
-	rows := newRowSplitter(width, p.DPI, fn)
+	rows := newRowSplitter(width, p.DPI, p.Mode, fn)
 	if err := d.scan(p, rows.write); err != nil {
 		return 0, 0, err
 	}

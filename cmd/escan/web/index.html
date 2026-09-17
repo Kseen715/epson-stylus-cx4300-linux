@@ -85,6 +85,14 @@
         <select id="dpi"></select>
         <button id="btnScanFull" class="span">Scan full bed</button>
       </div>
+      <div class="act">
+        <p class="label">Mode</p>
+        <!-- The device only ever scans colour; grey is the luma average of the
+             three colour planes, computed by the server. -->
+        <button id="btnColor" class="active" aria-pressed="true">Colour</button>
+        <button id="btnGray" aria-pressed="false"
+                title="Grey is the luma average of the colour the device scans: it suits text, makes a smaller file, and removes the colour speckle a grey original otherwise picks up">Grey</button>
+      </div>
     </div>
     <p class="muted" id="hint" style="margin:10px 0 0;font-size:12px">
       75 dpi is the lowest the scanner offers and the quickest - good for a

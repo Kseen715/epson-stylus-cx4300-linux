@@ -60,6 +60,7 @@ type imageInfo struct {
 	// Area is what was scanned, so a selection drawn on a preview maps back to
 	// device units without assuming how much the image was shrunk.
 	Area      area   `json:"area" doc:"the part of the platen this image covers"`
+	Gray      bool   `json:"gray" doc:"whether this image was scanned in grey rather than colour"`
 	SavedName string `json:"savedName,omitempty" doc:"file name in the output location; fetch it at /api/file/{name}"`
 	SavedPath string `json:"savedPath,omitempty" doc:"where that file was written, as the server sees it"`
 }

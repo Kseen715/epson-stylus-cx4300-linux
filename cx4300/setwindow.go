@@ -171,23 +171,43 @@ var planeLagWeight = func() [3]int {
 	return w
 }()
 
-// interleavePlanes writes one output row: the three colour planes of cur,
-// interleaved into dst at pixStride bytes per pixel, each resampled to red's
-// row by mixing in the plane's share of the previous wire line. For the first
-// line of an image, pass cur as prev - there is nothing above it to mix.
-func interleavePlanes(dst []byte, pixStride int, cur, prev []byte, plane, width int) {
-	for c := 0; c < 3; c++ {
-		wPrev := planeLagWeight[c]
-		src := cur[c*plane:]
-		if wPrev == 0 {
-			for x := 0; x < width; x++ {
-				dst[x*pixStride+c] = src[x]
-			}
-			continue
-		}
-		wCur, above := 256-wPrev, prev[c*plane:]
+// Rec. 601 luma weights over 256, which is what ModeGray averages the three
+// planes with. They sum to exactly 256, so a neutral grey pixel keeps its
+// value rather than drifting by a count.
+const (
+	lumaR = 77
+	lumaG = 150
+	lumaB = 29
+)
+
+// planeValue reads one pixel of one colour plane, resampled to red's row by
+// mixing in that plane's share of the previous wire line.
+func planeValue(cur, prev []byte, plane, c, x int) byte {
+	w := planeLagWeight[c]
+	v := cur[c*plane+x]
+	if w == 0 {
+		return v
+	}
+	return byte(((256-w)*int(v) + w*int(prev[c*plane+x]) + 128) >> 8)
+}
+
+// writeRow renders one output row from the three colour planes of wire line
+// cur, at pixStride bytes per pixel: RGB for ModeColor, a single luma byte for
+// ModeGray. prev is the wire line above, which planeValue resamples against;
+// for the first line of an image, pass cur as prev - there is nothing above it.
+func writeRow(dst []byte, pixStride int, mode Mode, cur, prev []byte, plane, width int) {
+	if mode == ModeGray {
 		for x := 0; x < width; x++ {
-			dst[x*pixStride+c] = byte((wCur*int(src[x]) + wPrev*int(above[x]) + 128) >> 8)
+			r := int(planeValue(cur, prev, plane, 0, x))
+			g := int(planeValue(cur, prev, plane, 1, x))
+			b := int(planeValue(cur, prev, plane, 2, x))
+			dst[x*pixStride] = byte((lumaR*r + lumaG*g + lumaB*b + 128) >> 8)
+		}
+		return
+	}
+	for c := 0; c < 3; c++ {
+		for x := 0; x < width; x++ {
+			dst[x*pixStride+c] = planeValue(cur, prev, plane, c, x)
 		}
 	}
 }
@@ -200,7 +220,9 @@ func interleavePlanes(dst []byte, pixStride int, cur, prev []byte, plane, width 
 // The row it passes to emit is reused, so a consumer that keeps it must copy.
 type rowSplitter struct {
 	emit   func(y int, row []byte) error
+	mode   Mode
 	width  int // pixels per row
+	pixel  int // bytes per pixel in the emitted row
 	plane  int // padded pixels per colour plane
 	stride int // bytes per wire line, all three planes
 	held   []byte
@@ -209,14 +231,16 @@ type rowSplitter struct {
 	lines  int
 }
 
-func newRowSplitter(width, dpi int, emit func(y int, row []byte) error) *rowSplitter {
-	plane := PlaneStride(width, dpi)
+func newRowSplitter(width, dpi int, mode Mode, emit func(y int, row []byte) error) *rowSplitter {
+	plane, pixel := PlaneStride(width, dpi), mode.BytesPerPixel()
 	return &rowSplitter{
 		emit:   emit,
+		mode:   mode,
 		width:  width,
+		pixel:  pixel,
 		plane:  plane,
 		stride: plane * 3,
-		row:    make([]byte, width*3),
+		row:    make([]byte, width*pixel),
 	}
 }
 
@@ -229,7 +253,7 @@ func (w *rowSplitter) write(chunk []byte) error {
 		if w.lines > 0 {
 			above = w.prev
 		}
-		interleavePlanes(w.row, 3, line, above, w.plane, w.width)
+		writeRow(w.row, w.pixel, w.mode, line, above, w.plane, w.width)
 		if err := w.emit(w.lines, w.row); err != nil {
 			return err
 		}
@@ -244,28 +268,63 @@ func (w *rowSplitter) write(chunk []byte) error {
 // Deinterleave converts the device's planar output into an image. Each scan
 // line arrives as three consecutive colour planes - the whole red row, then
 // green, then blue - each padded to PlaneStride pixels; the padding columns are
-// dropped here and each plane is resampled to red's row by planeRowLag. The resolution is needed because the padding depends on it.
+// dropped here and each plane is resampled to red's row by planeRowLag. The
+// resolution is needed because the padding depends on it, and the mode decides
+// whether the result is RGB or the luma average of the three planes.
 // Short input yields a correspondingly short image rather than an error, so a
 // partial scan is still viewable.
-func Deinterleave(raw []byte, width, height, dpi int) *image.RGBA {
+func Deinterleave(raw []byte, width, height, dpi int, mode Mode) image.Image {
 	plane := PlaneStride(width, dpi)
 	stride := plane * 3
 	lines := height
 	if got := len(raw) / stride; got < lines {
 		lines = got
 	}
-	img := image.NewRGBA(image.Rect(0, 0, width, lines))
+	rect := image.Rect(0, 0, width, lines)
+
+	var pix []byte
+	var pixStride, pixelBytes int
+	var img image.Image
+	if mode == ModeGray {
+		g := image.NewGray(rect)
+		img, pix, pixStride, pixelBytes = g, g.Pix, g.Stride, 1
+	} else {
+		c := image.NewRGBA(rect)
+		img, pix, pixStride, pixelBytes = c, c.Pix, c.Stride, 4
+	}
+
 	for y := 0; y < lines; y++ {
 		cur := raw[y*stride : y*stride+stride]
 		above := cur
 		if y > 0 {
 			above = raw[(y-1)*stride : y*stride]
 		}
-		row := img.Pix[y*img.Stride:]
-		interleavePlanes(row, 4, cur, above, plane, width)
-		for x := 0; x < width; x++ {
-			row[x*4+3] = 0xff
+		row := pix[y*pixStride:]
+		writeRow(row, pixelBytes, mode, cur, above, plane, width)
+		if pixelBytes == 4 {
+			for x := 0; x < width; x++ {
+				row[x*4+3] = 0xff
+			}
 		}
 	}
 	return img
+}
+
+// ToGray converts a finished image to the same 8-bit luma ModeGray produces.
+// The Windows backend needs it: WIA hands over a colour bitmap and gives no
+// say in the matter, so the conversion happens after the fact there.
+func ToGray(src image.Image) *image.Gray {
+	if g, ok := src.(*image.Gray); ok {
+		return g
+	}
+	b := src.Bounds()
+	dst := image.NewGray(image.Rect(0, 0, b.Dx(), b.Dy()))
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			r, g, bl, _ := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			dst.Pix[y*dst.Stride+x] = byte(
+				(lumaR*int(r>>8) + lumaG*int(g>>8) + lumaB*int(bl>>8) + 128) >> 8)
+		}
+	}
+	return dst
 }

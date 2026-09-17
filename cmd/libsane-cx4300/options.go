@@ -9,7 +9,9 @@ package main
 import "C"
 
 import (
+	"bytes"
 	"math"
+	"strings"
 	"unsafe"
 
 	"github.com/Kseen715/epson-stylus-cx4300-linux/cx4300"
@@ -21,6 +23,7 @@ import (
 const (
 	optCount = iota // option 0, "number of options"
 	optModeGroup
+	optMode
 	optResolution
 	optGeometryGroup
 	optTLX
@@ -30,9 +33,47 @@ const (
 	numOptions
 )
 
-// The device scans in 24-bit colour and nothing else - there is no mode option,
-// because there is no choice to offer. Frontends that ask for grayscale get
-// colour and convert it themselves.
+// The mode option's values, spelled the way SANE frontends expect to find them
+// so that a saved XSane or simple-scan setting matches. The device only ever
+// scans colour; "Gray" is the luma average of the three planes, computed in
+// cx4300 - see cx4300.ModeGray for why that is worth offering.
+const (
+	modeColorName = "Color"
+	modeGrayName  = "Gray"
+	// modeValueSize is the buffer SANE passes for the string, long enough for
+	// the longest name and its terminator.
+	modeValueSize = 8
+)
+
+func modeFor(name string) (cx4300.Mode, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "gray", "grey", "grayscale", "greyscale":
+		return cx4300.ModeGray, true
+	case "color", "colour", "rgb":
+		return cx4300.ModeColor, true
+	}
+	return cx4300.ModeColor, false
+}
+
+// modeFromBuffer reads the mode name out of the buffer a frontend passes.
+// SANE says it holds a NUL-terminated string of at most the option's size, but
+// the read is bounded by that size regardless: this is a C ABI, and a frontend
+// that forgets the terminator must not be able to walk us off the end of its
+// allocation.
+func modeFromBuffer(value unsafe.Pointer) string {
+	buf := unsafe.Slice((*byte)(value), modeValueSize)
+	if i := bytes.IndexByte(buf, 0); i >= 0 {
+		return string(buf[:i])
+	}
+	return string(buf)
+}
+
+func modeName(m cx4300.Mode) string {
+	if m == cx4300.ModeGray {
+		return modeGrayName
+	}
+	return modeColorName
+}
 
 // buildOptions lays the option table out in C memory, where it stays for the
 // life of the process: SANE hands frontends a pointer to each descriptor and
@@ -55,6 +96,18 @@ func buildOptions() []C.SANE_Option_Descriptor {
 	o = &opts[optModeGroup]
 	o.title = C.CString("Scan mode")
 	o._type = C.SANE_TYPE_GROUP
+
+	o = &opts[optMode]
+	o.name = C.CString("mode")
+	o.title = C.CString("Mode")
+	o.desc = C.CString("Colour, or grey computed from it as the luma average of the " +
+		"three colour planes. The device always scans colour; grey is a third of the " +
+		"bytes and cancels most of the per-channel noise a grey original picks up.")
+	o._type = C.SANE_TYPE_STRING
+	o.size = modeValueSize
+	o.cap = C.SANE_CAP_SOFT_SELECT | C.SANE_CAP_SOFT_DETECT
+	o.constraint_type = C.SANE_CONSTRAINT_STRING_LIST
+	setConstraint(o, unsafe.Pointer(modeList()))
 
 	o = &opts[optResolution]
 	o.name = C.CString("resolution")
@@ -103,6 +156,19 @@ func buildOptions() []C.SANE_Option_Descriptor {
 // cgo presents as opaque bytes.
 func setConstraint(o *C.SANE_Option_Descriptor, p unsafe.Pointer) {
 	*(*unsafe.Pointer)(unsafe.Pointer(&o.constraint[0])) = p
+}
+
+// modeList renders the mode names as the NULL-terminated string list a
+// SANE_CONSTRAINT_STRING_LIST option points at. Like every other descriptor
+// here it is never freed: a frontend may read it for the life of the process.
+func modeList() **C.char {
+	names := []string{modeColorName, modeGrayName}
+	mem := (**C.char)(C.calloc(C.size_t(len(names)+1), C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+	list := unsafe.Slice(mem, len(names)+1)
+	for i, n := range names {
+		list[i] = C.CString(n)
+	}
+	return mem
 }
 
 // resolutionList renders SupportedDPI as a SANE word list: the count, then the
@@ -157,6 +223,11 @@ func (h *handle) controlOption(option int, action C.SANE_Action, value unsafe.Po
 		switch option {
 		case optCount:
 			*(*C.SANE_Int)(value) = numOptions
+		case optMode:
+			name := modeName(h.mode)
+			buf := unsafe.Slice((*byte)(value), modeValueSize)
+			copy(buf, name)
+			buf[len(name)] = 0
 		case optResolution:
 			*(*C.SANE_Int)(value) = C.SANE_Int(h.dpi)
 		case optTLX, optTLY, optBRX, optBRY:
@@ -171,6 +242,15 @@ func (h *handle) controlOption(option int, action C.SANE_Action, value unsafe.Po
 			return C.SANE_STATUS_INVAL
 		}
 		switch option {
+		case optMode:
+			got, ok := modeFor(modeFromBuffer(value))
+			if !ok {
+				return C.SANE_STATUS_INVAL
+			}
+			h.mode = got
+			// The frame format and the row length both change with the mode, so
+			// a frontend that caches sane_get_parameters has to ask again.
+			setInfo(info, C.SANE_INFO_RELOAD_PARAMS, false)
 		case optResolution:
 			want := int(*(*C.SANE_Int)(value))
 			got := nearestDPI(want)
@@ -274,4 +354,20 @@ func abs(v int) int {
 		return -v
 	}
 	return v
+}
+
+// modeNamesFromConstraint reads a string-list constraint back out of a
+// descriptor. Only the tests need it: a test file cannot import "C", so the
+// pointer walk has to live here.
+func modeNamesFromConstraint(o *C.SANE_Option_Descriptor) []string {
+	list := *(***C.char)(unsafe.Pointer(&o.constraint[0]))
+	var out []string
+	for i := 0; ; i++ {
+		p := *(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(list)) +
+			uintptr(i)*unsafe.Sizeof((*C.char)(nil))))
+		if p == nil {
+			return out
+		}
+		out = append(out, C.GoString(p))
+	}
 }

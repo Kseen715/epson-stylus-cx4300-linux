@@ -37,6 +37,84 @@ func TestOptionTableDescribesTheDevice(t *testing.T) {
 	}
 }
 
+// The mode option is what lets a frontend ask for grey at all, so its shape
+// has to be exactly what SANE expects: a string constrained to a list, sized
+// for the longest name it offers.
+func TestModeOptionOffersColourAndGrey(t *testing.T) {
+	opts := buildOptions()
+	m := opts[optMode]
+	if m._type != typeString {
+		t.Errorf("mode is type %d, want a string", m._type)
+	}
+	if m.constraint_type != constraintStringList {
+		t.Errorf("mode constraint is %d, want a string list", m.constraint_type)
+	}
+	names := modeNamesFromConstraint(&m)
+	want := []string{modeColorName, modeGrayName}
+	if len(names) != len(want) {
+		t.Fatalf("mode list is %v, want %v", names, want)
+	}
+	for i, n := range want {
+		if names[i] != n {
+			t.Errorf("mode list[%d] = %q, want %q", i, names[i], n)
+		}
+		if len(n)+1 > int(m.size) {
+			t.Errorf("mode size %d cannot hold %q and its terminator", m.size, n)
+		}
+	}
+}
+
+func TestModeRoundTripAndScanParameters(t *testing.T) {
+	h := newHandle()
+	if h.mode != cx4300.ModeColor {
+		t.Errorf("default mode is %v, want colour", h.mode)
+	}
+
+	var info saneInt
+	buf := make([]byte, modeValueSize)
+	copy(buf, "Gray")
+	if st := h.controlOption(optMode, actionSet, unsafe.Pointer(&buf[0]), &info); st != statusGood {
+		t.Fatalf("setting Gray: status %d", st)
+	}
+	if h.mode != cx4300.ModeGray {
+		t.Fatalf("mode is %v after setting Gray", h.mode)
+	}
+	// The row length changes with the mode, so a frontend has to re-read the
+	// parameters or it will read the image apart.
+	if info&infoReloadParams == 0 {
+		t.Error("setting the mode did not report SANE_INFO_RELOAD_PARAMS")
+	}
+
+	for i := range buf {
+		buf[i] = 0
+	}
+	if st := h.controlOption(optMode, actionGet, unsafe.Pointer(&buf[0]), nil); st != statusGood {
+		t.Fatalf("reading the mode back: status %d", st)
+	}
+	if got := string(buf[:len("Gray")]); got != "Gray" {
+		t.Errorf("read back %q, want %q", got, "Gray")
+	}
+
+	p, err := h.params()
+	if err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if p.Mode != cx4300.ModeGray || p.Mode.BytesPerPixel() != 1 {
+		t.Errorf("scan params carry mode %v at %d bytes per pixel",
+			p.Mode, p.Mode.BytesPerPixel())
+	}
+
+	// Exactly modeValueSize bytes with no terminator: rejected on its content,
+	// and without reading past the buffer to find out.
+	copy(buf, "Nonsense")
+	if st := h.controlOption(optMode, actionSet, unsafe.Pointer(&buf[0]), nil); st != statusInval {
+		t.Errorf("an unknown mode returned status %d, want INVAL", st)
+	}
+	if h.mode != cx4300.ModeGray {
+		t.Error("a rejected mode changed the handle anyway")
+	}
+}
+
 func TestDefaultParamsAreTheWholePlaten(t *testing.T) {
 	h := newHandle()
 	p, err := h.params()

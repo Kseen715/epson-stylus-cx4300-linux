@@ -149,7 +149,7 @@ func main() {
 	}
 	fmt.Printf("  even/odd column split: %s\n", oddEvenColumns(raw, stride, plane, pw, lines))
 
-	img := cx4300.Deinterleave(raw, pw, ph, *dpi)
+	img := cx4300.Deinterleave(raw, pw, ph, *dpi, cx4300.ModeColor)
 	if err := writePNG(*out+".png", img); err != nil {
 		log.Fatal(err)
 	}

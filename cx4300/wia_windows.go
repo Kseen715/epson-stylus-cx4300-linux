@@ -176,6 +176,12 @@ func (w *WIA) Scan(p Params) (image.Image, error) {
 	if w.progress != nil {
 		w.progress(1, 1)
 	}
+	// WIA is asked for colour whatever the mode: the helper drives the vendor's
+	// own dialogue-free path and exposing its intent settings buys nothing when
+	// the same luma average is a pixel loop away.
+	if p.Mode == ModeGray {
+		return ToGray(img), nil
+	}
 	return img, nil
 }
 

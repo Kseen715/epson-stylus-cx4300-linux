@@ -141,6 +141,31 @@ All of these were measured the same way: dump the bytes a scan actually returns
 and recover the line period from them, by finding the byte offset at which the
 buffer best correlates with itself. The period is the plane width times three.
 
+### The three planes are not the same row
+
+The three planes of one wire line do not describe the same row of the page. With
+each plane's differenced row means aligned against red's, over two captures of a
+document with table rules and text:
+
+| | 300 dpi | 600 dpi |
+|---|---|---|
+| green trails red by | 0.15 rows | 0.18 rows |
+| blue trails red by | 0.85 rows | 0.95 rows |
+
+Both correlation curves peak cleanly (0.98 and 0.98 at 300 dpi, 0.99 and 1.00 at
+600), and the planes share a pitch horizontally to within 0.03 pixels across a
+row, so this is the only misregistration present. Blue is nearly a whole row
+out.
+
+The lag is in **lines, not inches**: a sensor whose three rows were physically
+apart would double from 300 to 600 dpi, and it does not. So it is applied per
+line at every resolution, as a linear mix of the wire line and the one above it.
+
+Decoding without it leaves a colour fringe on every horizontal edge, and turns
+the dither a printer renders grey with into a hue that rotates across the page -
+a grey original coming back in false colour is the symptom to look for.
+`tools/wirediag` measures all of this from a raw capture.
+
 Because the expected total depends on this, treat a `READ` that returns fewer
 bytes than requested as end-of-image and stop: issuing another `READ` leaves the
 device mid-transfer, which is one of the ways it locks up.

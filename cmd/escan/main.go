@@ -52,6 +52,7 @@ type server struct {
 	scanDPI    int
 	previewMax int
 	displayMax int
+	gray       bool // preselected in the page, and the default a request may omit
 	authOn     bool
 
 	// web is the embedded page directory, and api the route table both the mux
@@ -91,6 +92,10 @@ func main() {
 	displayMax := flag.Int("display-max", defaultDisplayMax,
 		"longest edge, in pixels, of the finished scan shown in the browser; the file "+
 			"saved to disk is always full resolution (0 keeps full size)")
+	gray := flag.Bool("gray", false,
+		"scan in grey by default: the device always scans colour, and each scan is "+
+			"reduced to its luma average, which suits text and removes the colour "+
+			"speckle a grey original picks up")
 	configPath := flag.String("config", defaultConfigPath,
 		"settings file; ignored if it does not exist")
 	smbAddress := flag.String("smb-address", "",
@@ -147,6 +152,7 @@ func main() {
 		scanDPI:    *scanDPI,
 		previewMax: *previewMax,
 		displayMax: *displayMax,
+		gray:       *gray,
 		authOn:     guard != nil,
 		web:        sub,
 	}
@@ -266,6 +272,7 @@ type statusResponse struct {
 	ScanDPI     int     `json:"scanDpi" doc:"resolution preselected in the scan menu"`
 	DPIOptions  []int   `json:"dpiOptions" doc:"every resolution the device accepts"`
 	OutDir      string  `json:"outDir" doc:"where finished scans are written"`
+	Gray        bool    `json:"gray" doc:"whether grey is preselected in the scan menu"`
 	CanReset    bool    `json:"canReset" doc:"whether /api/reset can recover this device"`
 	Auth        bool    `json:"auth" doc:"whether this server asks for a login"`
 
@@ -287,6 +294,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ScanDPI:     s.scanDPI,
 		DPIOptions:  cx4300.SupportedDPI,
 		OutDir:      s.out.Describe(),
+		Gray:        s.gray,
 		Auth:        s.authOn,
 	}
 	resp.Warning = hubWarning()
@@ -326,6 +334,22 @@ type scanRequest struct {
 	W    int  `json:"w" doc:"width, in units of 1/600 inch"`
 	H    int  `json:"h" doc:"height, in units of 1/600 inch"`
 	Full bool `json:"full" doc:"scan the whole bed and ignore the rectangle"`
+	// A pointer so that omitting the field means "whatever the server was
+	// started with", the same way dpi 0 does.
+	Gray *bool `json:"gray,omitempty" doc:"grey instead of colour; omit to take this server's default"`
+}
+
+// mode picks the pixel format for a request, falling back to the server's
+// default when the request says nothing.
+func (s *server) mode(req scanRequest) cx4300.Mode {
+	gray := s.gray
+	if req.Gray != nil {
+		gray = *req.Gray
+	}
+	if gray {
+		return cx4300.ModeGray
+	}
+	return cx4300.ModeColor
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +366,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if !req.Full && req.W > 0 && req.H > 0 {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
-	s.start(w, cx4300.Params{DPI: req.DPI, Area: area}, "preview", s.previewMax)
+	s.start(w, cx4300.Params{DPI: req.DPI, Area: area, Mode: s.mode(req)}, "preview", s.previewMax)
 }
 
 func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +381,7 @@ func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if !req.Full {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
-	s.start(w, cx4300.Params{DPI: req.DPI, Area: area}, "scan", s.displayMax)
+	s.start(w, cx4300.Params{DPI: req.DPI, Area: area, Mode: s.mode(req)}, "scan", s.displayMax)
 }
 
 // start accepts a scan and runs it in the background. The browser that asked is
@@ -449,7 +473,8 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 
 	var savedName, savedPath string
 	if kind == "scan" {
-		savedName = fmt.Sprintf("cx4300-%s-%ddpi.png", started.Format("20060102-150405"), p.DPI)
+		savedName = fmt.Sprintf("cx4300-%s-%ddpi%s.png",
+			started.Format("20060102-150405"), p.DPI, grayTag(p.Mode))
 		if err := writePNG(s.out, savedName, img); err != nil {
 			log.Printf("could not save %s: %v", savedName, err)
 			savedName = ""
@@ -468,7 +493,7 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 	info := imageInfo{
 		W: b.Dx(), H: b.Dy(), FullW: full.Dx(), FullH: full.Dy(),
 		DPI: p.DPI, ElapsedMs: elapsed.Milliseconds(), Area: fromArea(p.Area),
-		SavedName: savedName, SavedPath: savedPath,
+		Gray: p.Mode == cx4300.ModeGray, SavedName: savedName, SavedPath: savedPath,
 	}
 	s.hub.change(func() {
 		s.hub.publish(kind, buf.Bytes(), info)
@@ -478,6 +503,15 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 			s.hub.snap.Sel = nil
 		}
 	})
+}
+
+// grayTag names the mode in a saved file, so a directory of scans says which
+// are grey without opening them. Colour is the unmarked default.
+func grayTag(m cx4300.Mode) string {
+	if m == cx4300.ModeGray {
+		return "-gray"
+	}
+	return ""
 }
 
 // handleCancel stops the scan in progress - as far as this device allows.

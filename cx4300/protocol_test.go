@@ -197,7 +197,7 @@ func TestDeinterleave(t *testing.T) {
 			raw[o+x], raw[o+plane+x], raw[o+2*plane+x] = 0xff, 0xff, 0xff
 		}
 	}
-	img := Deinterleave(raw, w, h, 300)
+	img := Deinterleave(raw, w, h, 300, ModeColor)
 	if got := img.Bounds(); got != image.Rect(0, 0, w, h) {
 		t.Fatalf("bounds %v, want %v", got, image.Rect(0, 0, w, h))
 	}
@@ -242,7 +242,7 @@ func TestDeinterleaveCorrectsPlaneLag(t *testing.T) {
 			}
 		}
 	}
-	img := Deinterleave(raw, w, h, dpi)
+	img := Deinterleave(raw, w, h, dpi, ModeColor)
 	for y := 1; y < h; y++ {
 		for x := 0; x < w; x++ {
 			r, g, b, _ := img.At(x, y).RGBA()
@@ -254,6 +254,68 @@ func TestDeinterleaveCorrectsPlaneLag(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// ModeGray must deliver the luma average of the three planes, one byte per
+// pixel, with the same plane lag correction colour gets.
+func TestDeinterleaveGray(t *testing.T) {
+	const w, h, dpi = 3, 4, 300
+	plane := PlaneStride(w, dpi)
+	raw := make([]byte, plane*3*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < plane; x++ {
+			// Constant down the page, so the lag resample is a no-op and the
+			// expected luma can be written out by hand.
+			raw[y*plane*3+x] = 90         // red
+			raw[y*plane*3+plane+x] = 160  // green
+			raw[y*plane*3+2*plane+x] = 30 // blue
+		}
+	}
+	img := Deinterleave(raw, w, h, dpi, ModeGray)
+	gray, ok := img.(*image.Gray)
+	if !ok {
+		t.Fatalf("ModeGray returned %T, want *image.Gray", img)
+	}
+	if got := gray.Bounds(); got != image.Rect(0, 0, w, h) {
+		t.Fatalf("bounds %v, want %v", got, image.Rect(0, 0, w, h))
+	}
+	want := byte((lumaR*90 + lumaG*160 + lumaB*30 + 128) >> 8)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if got := gray.GrayAt(x, y).Y; got != want {
+				t.Fatalf("pixel (%d,%d) = %d, want %d", x, y, got, want)
+			}
+		}
+	}
+}
+
+// A neutral grey original must come back with its value intact: the weights sum
+// to 256 exactly so that grey does not drift, and ToGray must agree with the
+// decode path rather than being a second, subtly different formula.
+func TestGrayIsNeutralAndToGrayAgrees(t *testing.T) {
+	const w, h, dpi = 4, 3, 300
+	plane := PlaneStride(w, dpi)
+	for _, level := range []byte{0, 17, 128, 200, 255} {
+		raw := make([]byte, plane*3*h)
+		for i := range raw {
+			raw[i] = level
+		}
+		gray := Deinterleave(raw, w, h, dpi, ModeGray).(*image.Gray)
+		if got := gray.GrayAt(1, 1).Y; got != level {
+			t.Errorf("neutral %d decoded as %d", level, got)
+		}
+		colour := Deinterleave(raw, w, h, dpi, ModeColor)
+		if got := ToGray(colour).GrayAt(1, 1).Y; got != level {
+			t.Errorf("neutral %d through ToGray became %d", level, got)
+		}
+	}
+}
+
+func TestParamsValidateRejectsUnknownMode(t *testing.T) {
+	p := Params{DPI: 300, Area: FullBed(), Mode: Mode(7)}
+	if err := p.Validate(); err == nil {
+		t.Fatal("an unknown mode must be rejected")
 	}
 }
 

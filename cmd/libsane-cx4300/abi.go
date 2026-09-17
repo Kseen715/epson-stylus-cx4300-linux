@@ -40,9 +40,10 @@ const (
 	infoReloadOptions = C.SANE_INFO_RELOAD_OPTIONS
 	infoReloadParams  = C.SANE_INFO_RELOAD_PARAMS
 
-	typeInt   = C.SANE_TYPE_INT
-	typeFixed = C.SANE_TYPE_FIXED
-	typeGroup = C.SANE_TYPE_GROUP
+	typeInt    = C.SANE_TYPE_INT
+	typeFixed  = C.SANE_TYPE_FIXED
+	typeGroup  = C.SANE_TYPE_GROUP
+	typeString = C.SANE_TYPE_STRING
 
 	unitDPI = C.SANE_UNIT_DPI
 	unitMM  = C.SANE_UNIT_MM
@@ -51,8 +52,9 @@ const (
 	capSoftDetect = C.SANE_CAP_SOFT_DETECT
 	capAutomatic  = C.SANE_CAP_AUTOMATIC
 
-	constraintRange    = C.SANE_CONSTRAINT_RANGE
-	constraintWordList = C.SANE_CONSTRAINT_WORD_LIST
+	constraintRange      = C.SANE_CONSTRAINT_RANGE
+	constraintWordList   = C.SANE_CONSTRAINT_WORD_LIST
+	constraintStringList = C.SANE_CONSTRAINT_STRING_LIST
 
 	sizeofWord   = C.sizeof_SANE_Word
 	sizeofOption = C.sizeof_SANE_Option_Descriptor

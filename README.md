@@ -27,6 +27,10 @@ Works on Linux (direct USB) and Windows (through WIA).
 The whole flow, in order: preview, drag a crop on it, then scan the selection at
 whatever resolution you want.
 
+The Mode buttons choose colour or grey. Grey is computed from the colour the
+device scans - see the SANE section below for what that is good for - and
+`--gray` (or `gray = true` in the settings file) preselects it.
+
 **Nothing scanned yet.** The scanner identifies itself in the masthead, so you
 know it is reachable before starting.
 
@@ -241,10 +245,20 @@ scanimage --resolution 300 --format=png > a.png
 scanimage --resolution 150 -l 20 -t 30 -x 100 -y 150 --format=png > crop.png
 ```
 
-It offers the options the device actually has and no others: `resolution` (75,
-150, 300 or 600 dpi) and the four geometry options `-l/-t/-x/-y` in millimetres.
-Output is always 24-bit colour, because that is the only mode the hardware has;
-a frontend that wants grayscale converts it itself.
+It offers `resolution` (75, 150, 300 or 600 dpi), `mode` (`Color` or `Gray`) and
+the four geometry options `-l/-t/-x/-y` in millimetres, and nothing else.
+
+```sh
+scanimage --mode Gray --resolution 300 --format=png > page.png
+```
+
+The hardware itself only ever scans 24-bit colour, so `Gray` is computed here:
+each pixel becomes the luma average of the three colour planes. It is worth
+asking for on a grey or black-and-white original - text, documents, receipts -
+because averaging the three channels cancels most of the per-channel noise that
+otherwise shows up as colour speckle on a neutral page, and the frontend reads
+a third of the bytes. It does not make the scan itself any faster: the same
+colour data crosses the USB link either way.
 
 The backend claims the USB device only while a scan is running, so the web UI
 and a SANE frontend can both be open at once - whichever starts a scan first

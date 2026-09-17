@@ -75,6 +75,7 @@ var (
 // with the device open at once do not disturb each other's settings.
 type handle struct {
 	dpi                int
+	mode               cx4300.Mode
 	tlx, tly, brx, bry C.SANE_Fixed // millimetres, 16.16 fixed point
 
 	// Set between sane_start and the end of the scan.
@@ -94,6 +95,7 @@ func newHandle() *handle {
 
 func (h *handle) setDefaults() {
 	h.dpi = 300
+	h.mode = cx4300.ModeColor
 	h.tlx, h.tly = 0, 0
 	h.brx, h.bry = fix(bedWidthMM), fix(bedHeightMM)
 }
@@ -106,6 +108,7 @@ func (h *handle) params() (cx4300.Params, error) {
 	p := cx4300.Params{
 		DPI:  h.dpi,
 		Area: cx4300.Area{X: x0, Y: y0, W: x1 - x0, H: y1 - y0},
+		Mode: h.mode,
 	}
 	return p, p.Validate()
 }
@@ -293,10 +296,13 @@ func sane_cx4300_get_parameters(sh C.SANE_Handle, p *C.SANE_Parameters) C.SANE_S
 	}
 	width, height := sp.Area.Pixels(sp.DPI)
 	p.format = C.SANE_FRAME_RGB
+	if sp.Mode == cx4300.ModeGray {
+		p.format = C.SANE_FRAME_GRAY
+	}
 	p.last_frame = C.SANE_TRUE
 	p.depth = 8
 	p.pixels_per_line = C.SANE_Int(width)
-	p.bytes_per_line = C.SANE_Int(width * 3)
+	p.bytes_per_line = C.SANE_Int(width * sp.Mode.BytesPerPixel())
 	p.lines = C.SANE_Int(height)
 	return C.SANE_STATUS_GOOD
 }
@@ -323,7 +329,7 @@ func sane_cx4300_start(sh C.SANE_Handle) C.SANE_Status {
 		return statusFor(err)
 	}
 	width, height := p.Area.Pixels(p.DPI)
-	h.width, h.total, h.sent = width, width*3*height, 0
+	h.width, h.total, h.sent = width, width*p.Mode.BytesPerPixel()*height, 0
 	h.cancelled = false
 	h.scanning = true
 	h.stream = newStream()

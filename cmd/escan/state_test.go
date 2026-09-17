@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"image"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,5 +139,23 @@ func TestImageIDsDifferBetweenRuns(t *testing.T) {
 			}
 			ids[id] = true
 		}
+	}
+}
+
+// A grey scan is kept as image.Gray, and shrink is the one place that asserts a
+// concrete image type - so it has to handle both.
+func TestShrinkAcceptsGray(t *testing.T) {
+	src := image.NewGray(image.Rect(0, 0, 8, 4))
+	for i := range src.Pix {
+		src.Pix[i] = 120
+	}
+	got := shrink(src, 4)
+	b := got.Bounds()
+	if b.Dx() != 4 || b.Dy() != 2 {
+		t.Fatalf("shrunk to %dx%d, want 4x2", b.Dx(), b.Dy())
+	}
+	r, g, bl, _ := got.At(0, 0).RGBA()
+	if r>>8 != 120 || g>>8 != 120 || bl>>8 != 120 {
+		t.Errorf("flat grey 120 became %d,%d,%d", r>>8, g>>8, bl>>8)
 	}
 }

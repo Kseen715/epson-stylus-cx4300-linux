@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"image"
 	"image/color"
 	"io"
 	"net/http"
@@ -28,13 +29,13 @@ func TestLiveAveragesDownToDisplaySize(t *testing.T) {
 		t.Fatalf("display size %dx%d box %d, want 2x2 box 2", l.w, l.h, l.box)
 	}
 	// Two source rows of 100 and two of 200 average to one displayed row each.
-	l.put(row(4, 100, 100, 100))
-	l.put(row(4, 100, 100, 100))
+	l.put(row(4, 100, 100, 100), 3)
+	l.put(row(4, 100, 100, 100), 3)
 	if l.rows != 1 {
 		t.Fatalf("after two source rows the display has %d rows, want 1", l.rows)
 	}
-	l.put(row(4, 200, 200, 200))
-	l.put(row(4, 0, 0, 0))
+	l.put(row(4, 200, 200, 200), 3)
+	l.put(row(4, 0, 0, 0), 3)
 	l.finish()
 
 	if l.rows != 2 {
@@ -55,7 +56,7 @@ func TestLiveFinishesAPartialBlock(t *testing.T) {
 		t.Fatalf("display size %dx%d, want 2x2", l.w, l.h)
 	}
 	for i := 0; i < 3; i++ {
-		l.put(row(3, 60, 60, 60))
+		l.put(row(3, 60, 60, 60), 3)
 	}
 	if l.rows != 1 {
 		t.Fatalf("before finish %d rows are complete, want 1", l.rows)
@@ -91,7 +92,7 @@ func TestLiveReadWakesAndEndsWithTheScan(t *testing.T) {
 	if !ok || done || len(rows) != 0 || wait == nil {
 		t.Fatalf("read on an empty scan = (%d bytes, done=%v, wait=%v, ok=%v)", len(rows), done, wait, ok)
 	}
-	l.put(row(2, 1, 2, 3))
+	l.put(row(2, 1, 2, 3), 3)
 	select {
 	case <-wait:
 	default:
@@ -120,8 +121,8 @@ func TestHandleLiveStreamsBands(t *testing.T) {
 	}
 
 	s.live.start(2, 2, 0)
-	s.live.put(row(2, 10, 20, 30))
-	s.live.put(row(2, 40, 50, 60))
+	s.live.put(row(2, 10, 20, 30), 3)
+	s.live.put(row(2, 40, 50, 60), 3)
 	s.live.finish()
 
 	srv := httptest.NewServer(http.HandlerFunc(s.handleLive))
@@ -208,7 +209,7 @@ type rowFeeder struct {
 }
 
 func (f *rowFeeder) ScanRows(p cx4300.Params, fn func(y int, row []byte) error) (int, int, error) {
-	row := make([]byte, f.width*3)
+	row := make([]byte, f.width*p.Mode.BytesPerPixel())
 	for y := 0; y < f.height; y++ {
 		if f.onRow != nil {
 			f.onRow(y)
@@ -222,4 +223,72 @@ func (f *rowFeeder) ScanRows(p cx4300.Params, fn func(y int, row []byte) error) 
 		f.delivered++
 	}
 	return f.width, f.height, nil
+}
+
+// A grey row carries one byte per pixel; the live view is RGB whatever the
+// mode, so it has to reach all three channels or the page draws a red image.
+func TestLivePutGrayRowFillsAllChannels(t *testing.T) {
+	l := newLive()
+	l.start(2, 1, 0)
+	l.put([]byte{40, 200}, 1)
+	l.finish()
+
+	rows, _, _, ok := l.read(l.gen, 0)
+	if !ok || len(rows) != 2*3 {
+		t.Fatalf("read returned %d bytes, ok=%v; want 6", len(rows), ok)
+	}
+	for x, want := range []byte{40, 200} {
+		for c := 0; c < 3; c++ {
+			if got := rows[x*3+c]; got != want {
+				t.Errorf("pixel %d channel %d = %d, want %d", x, c, got, want)
+			}
+		}
+	}
+}
+
+// A grey scan must be kept as an 8-bit grey image, so the PNG written to disk
+// is a real greyscale file rather than three equal channels.
+func TestScanStreamingGrayKeepsGrayImage(t *testing.T) {
+	const width, height = 4, 3
+	fake := rowFeeder{width: width, height: height}
+	l := newLive()
+	l.start(width, height, 0)
+	img, err := scanStreaming(&fake, cx4300.Params{
+		DPI:  75,
+		Area: cx4300.Area{X: 0, Y: 0, W: width * cx4300.Unit / 75, H: height * cx4300.Unit / 75},
+		Mode: cx4300.ModeGray,
+	}, l, func() bool { return false })
+	if err != nil {
+		t.Fatalf("scanStreaming: %v", err)
+	}
+	gray, ok := img.(*image.Gray)
+	if !ok {
+		t.Fatalf("a grey scan produced %T, want *image.Gray", img)
+	}
+	// rowFeeder fills row y with y+1.
+	for y := 0; y < height; y++ {
+		if got := gray.GrayAt(0, y).Y; got != byte(y+1) {
+			t.Errorf("row %d = %d, want %d", y, got, y+1)
+		}
+	}
+}
+
+func TestRequestModeFallsBackToServerDefault(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		name   string
+		server bool
+		req    *bool
+		want   cx4300.Mode
+	}{
+		{"server colour, request silent", false, nil, cx4300.ModeColor},
+		{"server grey, request silent", true, nil, cx4300.ModeGray},
+		{"server colour, request asks grey", false, &yes, cx4300.ModeGray},
+		{"server grey, request asks colour", true, &no, cx4300.ModeColor},
+	} {
+		s := &server{gray: c.server}
+		if got := s.mode(scanRequest{Gray: c.req}); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
 }

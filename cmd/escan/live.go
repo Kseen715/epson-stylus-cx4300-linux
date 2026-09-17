@@ -91,16 +91,29 @@ func (l *live) start(fullW, fullH, maxEdge int) {
 	l.notify()
 }
 
-// put folds one full-resolution row of RGB triples into the displayed image,
-// completing a displayed row every box rows.
-func (l *live) put(row []byte) {
+// put folds one full-resolution row into the displayed image, completing a
+// displayed row every box rows. pixel is the row's bytes per pixel: 3 for
+// colour, or 1 for grey, which is spread across all three channels here.
+//
+// The shared buffer and the browser wire format stay RGB whatever the mode. A
+// grey pixel written as r=g=b costs three bytes instead of one in a copy that
+// is already capped to --display-max, and in exchange the browser protocol and
+// the page's drawing code need no notion of mode at all.
+func (l *live) put(row []byte, pixel int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.on || l.done {
 		return
 	}
-	for x := 0; x*3+2 < len(row) && x/l.box < l.w; x++ {
+	for x := 0; (x+1)*pixel <= len(row) && x/l.box < l.w; x++ {
 		o := (x / l.box) * 3
+		if pixel == 1 {
+			v := uint32(row[x])
+			l.acc[o+0] += v
+			l.acc[o+1] += v
+			l.acc[o+2] += v
+			continue
+		}
 		l.acc[o+0] += uint32(row[x*3+0])
 		l.acc[o+1] += uint32(row[x*3+1])
 		l.acc[o+2] += uint32(row[x*3+2])
@@ -249,12 +262,24 @@ func (s *server) handleLive(w http.ResponseWriter, r *http.Request) {
 // so the only safe way to stop early is to stop caring about what arrives.
 func scanStreaming(sc cx4300.StreamScanner, p cx4300.Params, l *live, stopped func() bool) (image.Image, error) {
 	width, height := p.Area.Pixels(p.DPI)
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	_, rows, err := sc.ScanRows(p, func(y int, row []byte) error {
-		if stopped() {
-			return nil
-		}
-		if y < height {
+	pixel := p.Mode.BytesPerPixel()
+	full := image.Rect(0, 0, width, height)
+
+	// Grey is kept as image.Gray all the way to the file, so the saved PNG is a
+	// real 8-bit greyscale one rather than three equal channels.
+	var keep func(y int, row []byte)
+	var whole image.Image
+	var crop func(rows int) image.Image
+	if p.Mode == cx4300.ModeGray {
+		img := image.NewGray(full)
+		whole = img
+		crop = func(rows int) image.Image { return img.SubImage(image.Rect(0, 0, width, rows)) }
+		keep = func(y int, row []byte) { copy(img.Pix[y*img.Stride:], row[:width]) }
+	} else {
+		img := image.NewRGBA(full)
+		whole = img
+		crop = func(rows int) image.Image { return img.SubImage(image.Rect(0, 0, width, rows)) }
+		keep = func(y int, row []byte) {
 			o := y * img.Stride
 			for x := 0; x < width; x++ {
 				img.Pix[o+x*4+0] = row[x*3+0]
@@ -263,7 +288,16 @@ func scanStreaming(sc cx4300.StreamScanner, p cx4300.Params, l *live, stopped fu
 				img.Pix[o+x*4+3] = 0xff
 			}
 		}
-		l.put(row)
+	}
+
+	_, rows, err := sc.ScanRows(p, func(y int, row []byte) error {
+		if stopped() {
+			return nil
+		}
+		if y < height {
+			keep(y, row)
+		}
+		l.put(row, pixel)
 		return nil
 	})
 	if err != nil {
@@ -274,7 +308,7 @@ func scanStreaming(sc cx4300.StreamScanner, p cx4300.Params, l *live, stopped fu
 	}
 	if rows < height {
 		// The device ended the image early; keep what it did send.
-		return img.SubImage(image.Rect(0, 0, width, rows)), nil
+		return crop(rows), nil
 	}
-	return img, nil
+	return whole, nil
 }

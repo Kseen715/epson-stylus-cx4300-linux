@@ -8,6 +8,7 @@
 const CONFIG = {
   previewDpi: 75,                     // fallback until the server reports its default
   scanDpi: 300,                       // fallback for the scan menu
+  gray: false,                        // fallback for the mode toggle (see --gray)
   dpiOptions: [75, 150, 300, 600],    // fallback list; the device's real set comes from the server
 
   reconnectMs: 2000,                  // wait before re-opening a dropped event stream
@@ -45,6 +46,8 @@ const state = {
   sel: null,           // {x, y, w, h} in canvas pixels, derived from snap.sel
   drag: null,
   view: 'preview',
+  // null until the server's default arrives or the user picks; see setGray.
+  gray: null,
   busy: false,
   liveScan: null,      // {w, h, rows} while a scan is painting itself onto the canvas
   liveFetching: false,
@@ -71,7 +74,8 @@ function showError(msg) {
 
 function setBusy(busy) {
   state.busy = busy;
-  for (const id of ['btnPreview', 'btnScanFull', 'dpi', 'previewDpi', 'btnReset']) {
+  for (const id of ['btnPreview', 'btnScanFull', 'dpi', 'previewDpi', 'btnReset',
+                    'btnColor', 'btnGray']) {
     el(id).disabled = busy;
   }
   const noSel = !state.sel;
@@ -99,6 +103,9 @@ async function refreshStatus() {
     fillSelect(el('previewDpi'), opts, s.previewDpi || CONFIG.previewDpi);
     fillSelect(el('dpi'), opts, s.scanDpi || CONFIG.scanDpi);
     el('outDir').textContent = s.outDir || '.';
+    // Only before the user has touched it: a status poll must not undo a
+    // choice made while it was in flight.
+    if (state.gray === null) setGray(s.gray ?? CONFIG.gray);
 
     el('status').textContent = s.device
       ? `${s.device}${s.firmware ? ' · ' + s.firmware : ''} · via ${s.backend}`
@@ -117,6 +124,16 @@ async function refreshStatus() {
 }
 
 // ---------- view switching ----------
+
+// setGray records the mode and mirrors it on the two buttons. The device always
+// scans colour; grey is the server's luma average of it.
+function setGray(gray) {
+  state.gray = gray;
+  el('btnGray').classList.toggle('active', gray);
+  el('btnColor').classList.toggle('active', !gray);
+  el('btnGray').setAttribute('aria-pressed', String(gray));
+  el('btnColor').setAttribute('aria-pressed', String(!gray));
+}
 
 function setView(name) {
   if (name === 'preview' && !state.preview && !state.liveScan) return;
@@ -454,7 +471,8 @@ function render(snap) {
   if (snap.last) {
     const secs = (snap.last.elapsedMs / 1000).toFixed(1);
     el('lastRun').textContent =
-      `${snap.last.dpi} dpi · ${snap.last.fullW}×${snap.last.fullH} px · ${secs}s`;
+      `${snap.last.dpi} dpi · ${snap.last.gray ? 'grey' : 'colour'} · ` +
+      `${snap.last.fullW}×${snap.last.fullH} px · ${secs}s`;
   }
   // The device line is worth re-reading once the scanner is free again.
   if (wasBusy && !snap.busy) refreshStatus();
@@ -560,23 +578,29 @@ async function requestScan(url, body) {
 
 const previewDpi = () => parseInt(el('previewDpi').value, 10) || CONFIG.previewDpi;
 const scanDpi = () => parseInt(el('dpi').value, 10) || CONFIG.scanDpi;
+// Sent on every request rather than left to the server's default, so the page
+// and the image always agree on the mode.
+const gray = () => !!state.gray;
+
+el('btnColor').addEventListener('click', () => setGray(false));
+el('btnGray').addEventListener('click', () => setGray(true));
 
 el('btnPreview').addEventListener('click', () =>
-  requestScan('/api/preview', { dpi: previewDpi(), full: true }));
+  requestScan('/api/preview', { dpi: previewDpi(), gray: gray(), full: true }));
 
 el('btnPreviewSel').addEventListener('click', () => {
   const u = selectionUnits();
   if (!u) return;
-  requestScan('/api/preview', { dpi: previewDpi(), ...u });
+  requestScan('/api/preview', { dpi: previewDpi(), gray: gray(), ...u });
 });
 
 el('btnScanFull').addEventListener('click', () =>
-  requestScan('/api/scan', { dpi: scanDpi(), full: true }));
+  requestScan('/api/scan', { dpi: scanDpi(), gray: gray(), full: true }));
 
 el('btnScanSel').addEventListener('click', () => {
   const u = selectionUnits();
   if (!u) return;
-  requestScan('/api/scan', { dpi: scanDpi(), ...u });
+  requestScan('/api/scan', { dpi: scanDpi(), gray: gray(), ...u });
 });
 
 // Stopping drops the image; the scanner still finishes its sweep, so the page
