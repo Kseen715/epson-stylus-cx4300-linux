@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,7 @@ type server struct {
 	previewMax int
 	displayMax int
 	gray       bool // preselected in the page, and the default a request may omit
+	oversample bool // scan below 300 dpi at 300 and average down
 	authOn     bool
 
 	// web is the embedded page directory, and api the route table both the mux
@@ -81,6 +83,13 @@ type server struct {
 }
 
 func main() {
+	// One subcommand, which does not serve: it scans once, measures this
+	// unit's colour plane alignment, writes it and exits. Everything else is
+	// the server, configured by flags, so the check is a simple one.
+	if len(os.Args) > 1 && os.Args[1] == "calibrate" {
+		os.Exit(runCalibrate(os.Args[2:]))
+	}
+
 	addr := flag.String("addr", defaultAddr, "address to listen on")
 	out := flag.String("out", defaultOutDir, "directory to write finished scans into")
 	previewDPI := flag.Int("preview-dpi", defaultPreviewDPI,
@@ -92,12 +101,20 @@ func main() {
 	displayMax := flag.Int("display-max", defaultDisplayMax,
 		"longest edge, in pixels, of the finished scan shown in the browser; the file "+
 			"saved to disk is always full resolution (0 keeps full size)")
+	oversample := flag.Bool("oversample", true,
+		"below 300 dpi, scan at 300 and average down. The colour planes alias fine "+
+			"detail differently at 75 and 150 dpi, which shows as fringing on thin "+
+			"lines; this removes it at the cost of the 300 dpi sweep. Previews never "+
+			"oversample")
 	gray := flag.Bool("gray", false,
 		"scan in grey by default: the device always scans colour, and each scan is "+
 			"reduced to its luma average, which suits text and removes the colour "+
 			"speckle a grey original picks up")
 	configPath := flag.String("config", defaultConfigPath,
 		"settings file; ignored if it does not exist")
+	calibrationPath := flag.String("calibration", defaultCalibrationPath,
+		"this scanner's measured colour plane alignment, as written by "+
+			"\"escan calibrate\"; the built-in values are used if it does not exist")
 	smbAddress := flag.String("smb-address", "",
 		"write scans to an SMB share instead of a local directory, as //host/share[/subdir]")
 	smbUser := flag.String("smb-user", "", "user to log in to the SMB share as")
@@ -131,6 +148,24 @@ func main() {
 		jwtSecret = cfg.get("jwt-secret")
 	}
 
+	// Before anything scans: a stored calibration replaces the built-in plane
+	// alignment, which is the only part of the decode that is per unit.
+	cal, calFound, err := cx4300.LoadCalibration(*calibrationPath)
+	if err != nil {
+		log.Printf("WARNING: %v", err)
+		log.Printf("WARNING: using the built-in colour plane alignment instead")
+	}
+	if err := cx4300.UseCalibration(cal); err != nil {
+		log.Fatalf("calibration: %v", err)
+	}
+	if calFound {
+		log.Printf("colour plane alignment from %s: green %.2f, blue %.2f",
+			*calibrationPath, cal.PlaneRowLag[1], cal.PlaneRowLag[2])
+	} else {
+		log.Printf("no calibration at %s; using the built-in colour plane alignment "+
+			"(run \"escan calibrate\" to measure this unit)", *calibrationPath)
+	}
+
 	guard, err := newAuth(*authUser, authPassword, jwtSecret, *authTTL, *authRefreshTTL)
 	if err != nil {
 		log.Fatal(err)
@@ -153,6 +188,7 @@ func main() {
 		previewMax: *previewMax,
 		displayMax: *displayMax,
 		gray:       *gray,
+		oversample: *oversample,
 		authOn:     guard != nil,
 		web:        sub,
 	}
@@ -273,6 +309,7 @@ type statusResponse struct {
 	DPIOptions  []int   `json:"dpiOptions" doc:"every resolution the device accepts"`
 	OutDir      string  `json:"outDir" doc:"where finished scans are written"`
 	Gray        bool    `json:"gray" doc:"whether grey is preselected in the scan menu"`
+	Oversample  bool    `json:"oversample" doc:"whether scans below 300 dpi are taken at 300 and averaged down"`
 	CanReset    bool    `json:"canReset" doc:"whether /api/reset can recover this device"`
 	Auth        bool    `json:"auth" doc:"whether this server asks for a login"`
 
@@ -295,6 +332,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		DPIOptions:  cx4300.SupportedDPI,
 		OutDir:      s.out.Describe(),
 		Gray:        s.gray,
+		Oversample:  s.oversample,
 		Auth:        s.authOn,
 	}
 	resp.Warning = hubWarning()
@@ -337,6 +375,8 @@ type scanRequest struct {
 	// A pointer so that omitting the field means "whatever the server was
 	// started with", the same way dpi 0 does.
 	Gray *bool `json:"gray,omitempty" doc:"grey instead of colour; omit to take this server's default"`
+	// Same convention as gray: absent means the server's setting.
+	Oversample *bool `json:"oversample,omitempty" doc:"below 300 dpi, scan at 300 and average down for clean colour; omit to take this server's default. Previews never oversample"`
 }
 
 // mode picks the pixel format for a request, falling back to the server's
@@ -366,6 +406,8 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if !req.Full && req.W > 0 && req.H > 0 {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
+	// No oversampling: a preview is for framing, and driving the device at
+	// OpticalDPI would cost the whole higher-resolution sweep.
 	s.start(w, cx4300.Params{DPI: req.DPI, Area: area, Mode: s.mode(req)}, "preview", s.previewMax)
 }
 
@@ -381,7 +423,15 @@ func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if !req.Full {
 		area = cx4300.Area{X: req.X, Y: req.Y, W: req.W, H: req.H}
 	}
-	s.start(w, cx4300.Params{DPI: req.DPI, Area: area, Mode: s.mode(req)}, "scan", s.displayMax)
+	s.start(w, cx4300.Params{
+		DPI:  req.DPI,
+		Area: area,
+		Mode: s.mode(req),
+		// Below 300 dpi the colour planes alias the fine detail differently
+		// and thin lines come out fringed, so a real scan is taken at 300 and
+		// averaged down. It costs the 300 dpi sweep; --no-oversample declines.
+		Oversample: s.oversampleFor(req),
+	}, "scan", s.displayMax)
 }
 
 // start accepts a scan and runs it in the background. The browser that asked is
@@ -396,7 +446,7 @@ func (s *server) start(w http.ResponseWriter, p cx4300.Params, kind string, maxE
 	s.stop.Store(false)
 	// Announced here rather than when the device answers, so a browser that
 	// asks for the stream the moment it sees "busy" finds it waiting.
-	fullW, fullH := p.Area.Pixels(p.DPI)
+	fullW, fullH := p.PixelSize()
 	s.live.start(fullW, fullH, maxEdge)
 	s.hub.change(func() {
 		s.hub.snap.Busy = true
@@ -503,6 +553,15 @@ func (s *server) run(p cx4300.Params, kind string, maxEdge int) {
 			s.hub.snap.Sel = nil
 		}
 	})
+}
+
+// oversampleFor picks whether to oversample, falling back to the server's
+// setting when the request says nothing.
+func (s *server) oversampleFor(req scanRequest) bool {
+	if req.Oversample != nil {
+		return *req.Oversample
+	}
+	return s.oversample
 }
 
 // grayTag names the mode in a saved file, so a directory of scans says which

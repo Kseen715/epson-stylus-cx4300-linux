@@ -92,11 +92,49 @@ func (a Area) Millimetres() (w, h float64) {
 	return float64(a.W) / Unit * mmPerInch, float64(a.H) / Unit * mmPerInch
 }
 
+// OpticalDPI is the finest the sensor genuinely samples. Below it the device
+// subsamples rather than averaging, and because the three colour planes read
+// different rows they alias the fine detail differently - which comes out as
+// colour fringing on thin, near-horizontal lines, worst at 75 dpi.
+//
+// Measured on line art, as the mean channel difference over one window with
+// each channel's own level removed, for a 75 dpi result: 33.1 counts scanned
+// natively, 21.2 from 150, 17.1 from 300, 17.0 from 600. So 300 is where it
+// stops paying, and 600 as a source costs four times the sweep for nothing.
+const OpticalDPI = 300
+
 // Params describes one scan.
 type Params struct {
 	DPI  int
 	Area Area
 	Mode Mode
+
+	// Oversample scans at OpticalDPI and averages down when the wanted
+	// resolution is a whole fraction of it, which is the only way to get clean
+	// colour below 300 dpi. It costs the time of the higher-resolution sweep,
+	// so a preview - where framing matters and colour does not - leaves it off.
+	Oversample bool
+}
+
+// sampling reports the resolution the device is actually driven at and how many
+// source pixels fold into one output pixel on each axis. The fold has to be a
+// whole number, so a resolution that does not divide OpticalDPI is scanned
+// natively however Oversample is set.
+func (p Params) sampling() (dpi, box int) {
+	if !p.Oversample || p.DPI >= OpticalDPI || OpticalDPI%p.DPI != 0 {
+		return p.DPI, 1
+	}
+	return OpticalDPI, OpticalDPI / p.DPI
+}
+
+// PixelSize is the size of the image a scan delivers. With oversampling it is
+// the source size divided by the fold, not the area at the wanted resolution:
+// deriving it from the source keeps the two from disagreeing by a pixel when
+// the division is not exact.
+func (p Params) PixelSize() (w, h int) {
+	dpi, box := p.sampling()
+	sw, sh := p.Area.Pixels(dpi)
+	return sw / box, sh / box
 }
 
 // Validate reports whether the parameters are usable, so callers get a clear

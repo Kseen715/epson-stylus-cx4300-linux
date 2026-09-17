@@ -115,6 +115,58 @@ func TestModeRoundTripAndScanParameters(t *testing.T) {
 	}
 }
 
+func TestOversampleOptionRoundTrip(t *testing.T) {
+	opts := buildOptions()
+	if got := opts[optOversample]._type; got != typeBool {
+		t.Errorf("oversample is type %d, want a bool", got)
+	}
+
+	h := newHandle()
+	if !h.oversample {
+		t.Error("oversampling must default on: without it 75 and 150 dpi come out fringed")
+	}
+	h.dpi = 75
+
+	var info saneInt
+	off := saneBool(0)
+	if st := h.controlOption(optOversample, actionSet, unsafe.Pointer(&off), &info); st != statusGood {
+		t.Fatalf("turning oversampling off: status %d", st)
+	}
+	p, err := h.params()
+	if err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if p.Oversample {
+		t.Error("the scan request still asks to oversample")
+	}
+	// Turning it off must not change the size of the image promised.
+	offW, offH := p.PixelSize()
+
+	on := saneBool(1)
+	if st := h.controlOption(optOversample, actionSet, unsafe.Pointer(&on), &info); st != statusGood {
+		t.Fatalf("turning oversampling on: status %d", st)
+	}
+	p, err = h.params()
+	if err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if !p.Oversample {
+		t.Fatal("the scan request does not ask to oversample")
+	}
+	if onW, onH := p.PixelSize(); onW != offW || onH != offH {
+		t.Errorf("oversampling changed the image size from %dx%d to %dx%d; it must not",
+			offW, offH, onW, onH)
+	}
+
+	var back saneBool
+	if st := h.controlOption(optOversample, actionGet, unsafe.Pointer(&back), nil); st != statusGood {
+		t.Fatalf("reading it back: status %d", st)
+	}
+	if back == 0 {
+		t.Error("read back false after setting true")
+	}
+}
+
 func TestDefaultParamsAreTheWholePlaten(t *testing.T) {
 	h := newHandle()
 	p, err := h.params()

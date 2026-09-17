@@ -54,6 +54,17 @@ const (
 	bedHeightMM = float64(cx4300.BedHeight) / cx4300.Unit * 25.4
 )
 
+// calibrationPath is where this scanner's measured colour plane alignment is
+// read from - the same file "escan calibrate" writes, so a unit calibrated once
+// is calibrated for both frontends. A backend has no command line to override
+// it with, hence the environment variable.
+func calibrationPath() string {
+	if p := os.Getenv("CX4300_CALIBRATION"); p != "" {
+		return p
+	}
+	return defaultCalibrationPath
+}
+
 // deviceName is the name this backend answers to. SANE prefixes it with the
 // backend name, so frontends show it as "cx4300:cx4300"; sane_open also accepts
 // an empty name, which is what "scanimage" uses with no device given.
@@ -76,6 +87,7 @@ var (
 type handle struct {
 	dpi                int
 	mode               cx4300.Mode
+	oversample         bool
 	tlx, tly, brx, bry C.SANE_Fixed // millimetres, 16.16 fixed point
 
 	// Set between sane_start and the end of the scan.
@@ -96,6 +108,10 @@ func newHandle() *handle {
 func (h *handle) setDefaults() {
 	h.dpi = 300
 	h.mode = cx4300.ModeColor
+	// On by default: below 300 dpi the colour planes alias fine detail
+	// differently and thin lines come out fringed. A frontend that would rather
+	// have the shorter sweep turns it off.
+	h.oversample = true
 	h.tlx, h.tly = 0, 0
 	h.brx, h.bry = fix(bedWidthMM), fix(bedHeightMM)
 }
@@ -106,9 +122,10 @@ func (h *handle) params() (cx4300.Params, error) {
 	x0, y0 := mmToUnits(h.tlx), mmToUnits(h.tly)
 	x1, y1 := mmToUnits(h.brx), mmToUnits(h.bry)
 	p := cx4300.Params{
-		DPI:  h.dpi,
-		Area: cx4300.Area{X: x0, Y: y0, W: x1 - x0, H: y1 - y0},
-		Mode: h.mode,
+		DPI:        h.dpi,
+		Area:       cx4300.Area{X: x0, Y: y0, W: x1 - x0, H: y1 - y0},
+		Mode:       h.mode,
+		Oversample: h.oversample,
 	}
 	return p, p.Validate()
 }
@@ -168,12 +185,34 @@ func sane_cx4300_init(versionCode *C.SANE_Int, authorize C.SANE_Auth_Callback) C
 	if !inited {
 		opts = buildOptions()
 		devices, noDevs = buildDeviceLists()
+		loadCalibration()
 		inited = true
 	}
 	if versionCode != nil {
 		*versionCode = saneVersion
 	}
 	return C.SANE_STATUS_GOOD
+}
+
+// loadCalibration puts this unit's measured plane alignment into force, and
+// says so on stderr either way: a frontend shows no such thing, and silently
+// decoding with the wrong unit's numbers is the failure this exists to prevent.
+// The caller holds mu.
+func loadCalibration() {
+	path := calibrationPath()
+	cal, found, err := cx4300.LoadCalibration(path)
+	if err != nil {
+		warn("%v", err)
+		warn("using the built-in colour plane alignment instead")
+	}
+	if err := cx4300.UseCalibration(cal); err != nil {
+		warn("calibration: %v", err) // the built-in one stays in force
+		return
+	}
+	if found {
+		warn("colour plane alignment from %s: green %.2f, blue %.2f",
+			path, cal.PlaneRowLag[1], cal.PlaneRowLag[2])
+	}
 }
 
 //export sane_cx4300_exit
@@ -294,7 +333,7 @@ func sane_cx4300_get_parameters(sh C.SANE_Handle, p *C.SANE_Parameters) C.SANE_S
 		warn("%v", err)
 		return C.SANE_STATUS_INVAL
 	}
-	width, height := sp.Area.Pixels(sp.DPI)
+	width, height := sp.PixelSize()
 	p.format = C.SANE_FRAME_RGB
 	if sp.Mode == cx4300.ModeGray {
 		p.format = C.SANE_FRAME_GRAY
@@ -328,7 +367,7 @@ func sane_cx4300_start(sh C.SANE_Handle) C.SANE_Status {
 		warn("%v", err)
 		return statusFor(err)
 	}
-	width, height := p.Area.Pixels(p.DPI)
+	width, height := p.PixelSize()
 	h.width, h.total, h.sent = width, width*p.Mode.BytesPerPixel()*height, 0
 	h.cancelled = false
 	h.scanning = true

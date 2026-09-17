@@ -164,7 +164,30 @@ line at every resolution, as a linear mix of the wire line and the one above it.
 Decoding without it leaves a colour fringe on every horizontal edge, and turns
 the dither a printer renders grey with into a hue that rotates across the page -
 a grey original coming back in false colour is the symptom to look for.
-`tools/wirediag` measures all of this from a raw capture.
+`tools/wirediag` measures all of this from a raw capture, and `escan calibrate`
+measures it on the scanner in front of you and stores it - the lag is a property
+of the individual unit, so the numbers above are this one's, not the model's.
+
+### Below 300 dpi the device subsamples
+
+300 dpi is the finest the sensor genuinely samples. Ask for less and the device
+subsamples rather than averaging, and since the three planes read different rows
+(above), each aliases fine detail differently. The result is colour fringing on
+thin, near-horizontal lines: strong at 75 dpi, visible at 150, absent at 300 and
+600.
+
+Measured on line art as the mean channel difference over one window, each
+channel's own level removed, for a 75 dpi result:
+
+| source | 75 dpi | 150 dpi |
+|---|---|---|
+| scanned natively | 33.1 | 26.5 |
+| from 150 dpi | 21.2 | - |
+| from 300 dpi | **17.1** | **19.6** |
+| from 600 dpi | 17.0 | 19.1 |
+
+So a clean scan below 300 dpi is a 300 dpi scan averaged down by a whole factor,
+and 600 as the source buys nothing for four times the sweep.
 
 Because the expected total depends on this, treat a `READ` that returns fewer
 bytes than requested as end-of-image and stop: issuing another `READ` leaves the

@@ -3,11 +3,10 @@
 /escan
 /escan.exe
 *.pnm
-cx4300-*.png
 image/raw/
 libsane-cx4300.so.*
 /wirediag
 *.raw
-band*.png
-hdr*.png
-wirediag*.png
+# Diagnostic captures and decodes land at the repo root; the tracked
+# screenshots live under image/.
+/*.png

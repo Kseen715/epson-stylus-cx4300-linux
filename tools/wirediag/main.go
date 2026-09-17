@@ -24,63 +24,135 @@ import (
 
 func main() {
 	var (
-		dpi    = flag.Int("dpi", 300, "scan resolution")
-		x      = flag.Int("x", 0, "area origin x, 1/600 inch")
-		y      = flag.Int("y", 0, "area origin y, 1/600 inch")
-		w      = flag.Int("w", 1200, "area width, 1/600 inch (1200 = 2 inch)")
-		h      = flag.Int("h", 1200, "area height, 1/600 inch")
-		in     = flag.String("in", "", "analyse this raw capture instead of scanning")
+		dpi   = flag.Int("dpi", 300, "scan resolution")
+		sweep = flag.Bool("sweep", false,
+			"capture and analyse every resolution the device supports, in one pass")
+		x     = flag.Int("x", 0, "area origin x, 1/600 inch")
+		y     = flag.Int("y", 0, "area origin y, 1/600 inch")
+		w     = flag.Int("w", 1200, "area width, 1/600 inch (1200 = 2 inch)")
+		h     = flag.Int("h", 1200, "area height, 1/600 inch")
+		in    = flag.String("in", "", "analyse this raw capture instead of scanning")
+		reuse = flag.String("compare", "",
+			"re-analyse a sweep already on disk, as <prefix>-<dpi>dpi.raw, without rescanning")
 		out    = flag.String("out", "wirediag", "output prefix for .raw and .png")
 		width  = flag.Int("width", 0, "pixel width of -in capture (default: from -w/-dpi)")
 		height = flag.Int("height", 0, "pixel height of -in capture")
 	)
 	flag.Parse()
 
-	p := cx4300.Params{DPI: *dpi, Area: cx4300.Area{X: *x, Y: *y, W: *w, H: *h}}
-	pw, ph := p.Area.Pixels(*dpi)
-	if *width != 0 {
-		pw = *width
-	}
-	if *height != 0 {
-		ph = *height
-	}
+	area := cx4300.Area{X: *x, Y: *y, W: *w, H: *h}
 
-	var raw []byte
 	if *in != "" {
-		b, err := os.ReadFile(*in)
+		raw, err := os.ReadFile(*in)
 		if err != nil {
 			log.Fatal(err)
 		}
-		raw = b
 		fmt.Printf("read %s: %d bytes\n", *in, len(raw))
-	} else {
-		if err := p.Validate(); err != nil {
-			log.Fatal(err)
+		pw, ph := area.Pixels(*dpi)
+		if *width != 0 {
+			pw = *width
 		}
-		sc, err := cx4300.Open()
-		if err != nil {
-			log.Fatal(err)
+		if *height != 0 {
+			ph = *height
 		}
-		defer sc.Close()
-		dev, ok := sc.(*cx4300.Device)
-		if !ok {
-			log.Fatal("raw capture needs the Linux backend")
-		}
-		b, cw, ch, err := dev.ScanRaw(p)
-		if err != nil {
-			log.Fatal(err)
-		}
-		raw, pw, ph = b, cw, ch
-		if err := os.WriteFile(*out+".raw", raw, 0o644); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("wrote %s.raw: %d bytes\n", *out, len(raw))
+		analyse(raw, pw, ph, *dpi, *out)
+		return
 	}
 
-	assumed := cx4300.PlaneStride(pw, *dpi) * 3
-	fmt.Printf("\nrequested %dx%d px at %d dpi\n", pw, ph, *dpi)
+	resolutions := []int{*dpi}
+	if *sweep || *reuse != "" {
+		resolutions = cx4300.SupportedDPI
+	}
+	for _, d := range resolutions {
+		if err := (cx4300.Params{DPI: d, Area: area}).Validate(); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if *reuse != "" {
+		var summary []report
+		for _, d := range resolutions {
+			path := fmt.Sprintf("%s-%ddpi.raw", *reuse, d)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Printf("\nskipping %d dpi: %v\n", d, err)
+				continue
+			}
+			fmt.Printf("\n================ %d dpi ================\n", d)
+			fmt.Printf("read %s: %d bytes\n", path, len(raw))
+			pw, ph := area.Pixels(d)
+			summary = append(summary,
+				gridded(analyse(raw, pw, ph, d, ""), raw, area, pw, d, resolutions))
+		}
+		if len(summary) > 1 {
+			printSummary(summary)
+			compareColour(summary)
+		}
+		return
+	}
+
+	sc, err := cx4300.Open()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sc.Close()
+	dev, ok := sc.(*cx4300.Device)
+	if !ok {
+		log.Fatal("raw capture needs the Linux backend")
+	}
+
+	var summary []report
+	for _, d := range resolutions {
+		prefix := *out
+		if *sweep {
+			prefix = fmt.Sprintf("%s-%ddpi", *out, d)
+		}
+		fmt.Printf("\n================ %d dpi ================\n", d)
+		raw, pw, ph, err := dev.ScanRaw(cx4300.Params{DPI: d, Area: area})
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := os.WriteFile(prefix+".raw", raw, 0o644); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("wrote %s.raw: %d bytes\n", prefix, len(raw))
+		summary = append(summary,
+			gridded(analyse(raw, pw, ph, d, prefix), raw, area, pw, d, resolutions))
+	}
+	if len(summary) > 1 {
+		printSummary(summary)
+		compareColour(summary)
+	}
+}
+
+// report is one resolution's findings, for the cross-resolution summary. What
+// matters there is whether a single calibration can serve every resolution, so
+// each field is the thing that would have to be per-resolution if it varied.
+type report struct {
+	dpi      int
+	stride   string
+	lag      [3]string // measured, before the decode's correction
+	residual [3]string // what is left after it
+	means    [3]float64
+	clipped  [3]float64
+	cast     string
+
+	// grid holds the three channels box-averaged onto a resolution-independent
+	// grid, so captures of the same area at different resolutions can be
+	// compared pixel for pixel. Only a sweep fills it.
+	grid   [3][]float64
+	gw, gh int
+}
+
+// analyse runs every check over one capture and prints it, returning the parts
+// worth comparing between resolutions.
+func analyse(raw []byte, pw, ph, dpi int, outPrefix string) report {
+	rep := report{dpi: dpi}
+
+	assumed := cx4300.PlaneStride(pw, dpi) * 3
+	fmt.Printf("\nrequested %dx%d px at %d dpi\n", pw, ph, dpi)
 	fmt.Printf("decoder assumes %d bytes per wire line (plane stride %d px)\n",
-		assumed, cx4300.PlaneStride(pw, *dpi))
+		assumed, cx4300.PlaneStride(pw, dpi))
 	fmt.Printf("capture holds %d whole lines at that stride; %d were requested\n",
 		len(raw)/assumed, ph)
 
@@ -101,21 +173,40 @@ func main() {
 		fmt.Printf("  inconclusive: no distinct minimum (best %.3f against %.3f elsewhere).\n",
 			best.cost, best.rival)
 		fmt.Printf("  Using the decoder's %d bytes for the checks below.\n", assumed)
+		rep.stride = "inconclusive"
 	case best.stride != assumed:
 		fmt.Printf("  MISMATCH: measured %d bytes, decoder uses %d, off by %d per line.\n",
 			best.stride, assumed, best.stride-assumed)
 		fmt.Printf("  Using the measured %d bytes for the checks below.\n", best.stride)
 		stride = best.stride
+		rep.stride = fmt.Sprintf("%+d bytes", best.stride-assumed)
 	default:
 		fmt.Printf("  measured %d bytes, matching the decoder.\n", best.stride)
+		rep.stride = "ok"
 	}
 
 	plane := stride / 3
 	if len(raw) < stride*8 {
 		fmt.Println("\ncapture too short for the remaining checks")
-		return
+		return rep
 	}
 	lines := len(raw) / stride
+
+	fmt.Printf("\n-- channel levels --\n")
+	fmt.Println("(a cast is a per-channel gain the decode does not correct. The verdict")
+	fmt.Println(" is read from the channel means, not from paper white: this device")
+	fmt.Println(" drives white to saturation, and clipped highlights are equal in every")
+	fmt.Println(" channel however far apart the gains are)")
+	white := whiteLevels(raw, stride, plane, pw, lines)
+	rep.means = channelMeans(raw, stride, plane, pw, lines)
+	rep.clipped = clippedFraction(raw, stride, plane, pw, lines)
+	names := [3]string{"red  ", "green", "blue "}
+	for c := 0; c < 3; c++ {
+		fmt.Printf("  %s: mean %6.2f   95th percentile %5.1f   at 255: %5.2f%%\n",
+			names[c], rep.means[c], white[c], rep.clipped[c]*100)
+	}
+	rep.cast = describeCast(rep.means, rep.clipped)
+	fmt.Printf("  %s\n", rep.cast)
 
 	fmt.Printf("\n-- vertical offset between colour planes --\n")
 	fmt.Println("(a tri-linear CCD reads R, G and B on physically separate rows;")
@@ -123,15 +214,44 @@ func main() {
 	fmt.Println(" offset here is real colour misregistration - and a printed dither")
 	fmt.Println(" sampled through it turns grey into a hue that rotates across the page)")
 	fmt.Println(" needs horizontal detail - rules, text baselines - to measure at all")
-	for _, pr := range [][2]int{{0, 1}, {0, 2}} {
-		dy, ok, curve := planeOffset(raw, stride, plane, pw, lines, pr[0], pr[1])
-		if !ok {
-			fmt.Printf("  plane %d vs plane %d: too flat to measure - recapture over table rules or text\n",
-				pr[0], pr[1])
+	// Measured by the package, so the calibration a scan uses and the number a
+	// diagnostic prints come from one piece of code rather than two copies.
+	lag := cx4300.PlaneRowLag()
+	var rows [3][]float64
+	for c := 0; c < 3; c++ {
+		rows[c] = rowMeans(raw, stride, plane, pw, lines, c)
+	}
+	m := cx4300.MeasurePlaneLagFrom(rows)
+
+	// The same measurement with the decode's correction already applied to the
+	// row means: a linear mix of lines is a linear mix of their means, so what
+	// comes back is what the correction leaves behind.
+	var corrected [3][]float64
+	for c := 0; c < 3; c++ {
+		corrected[c] = applyLag(rows[c], lag[c])
+	}
+	res := cx4300.MeasurePlaneLagFrom(corrected)
+
+	planeNames := [3]string{"red", "green", "blue"}
+	for c := 1; c < 3; c++ {
+		if !m.Measured[c] {
+			fmt.Printf("  %s vs red: too flat to measure (best correlation %.3f)"+
+				" - recapture over table rules or text\n", planeNames[c], m.Confidence[c])
+			rep.lag[c], rep.residual[c] = "flat", "flat"
 			continue
 		}
-		fmt.Printf("  plane %d vs plane %d: best offset %+.2f rows\n", pr[0], pr[1], dy)
-		fmt.Printf("      correlation %s\n", curve)
+		fmt.Printf("  %s vs red: trails by %.2f rows (correlation %.3f)\n",
+			planeNames[c], m.Lag[c], m.Confidence[c])
+		fmt.Printf("      correlation %s\n", curveText(m, c))
+		rep.lag[c] = fmt.Sprintf("%+.2f", -m.Lag[c])
+
+		if !res.Measured[c] {
+			rep.residual[c] = "flat"
+			continue
+		}
+		fmt.Printf("      after the decode's %.2f row correction: %+.2f rows left\n",
+			lag[c], res.Lag[c])
+		rep.residual[c] = fmt.Sprintf("%+.2f", -res.Lag[c])
 	}
 
 	fmt.Printf("\n-- horizontal plane registration across the width --\n")
@@ -149,11 +269,401 @@ func main() {
 	}
 	fmt.Printf("  even/odd column split: %s\n", oddEvenColumns(raw, stride, plane, pw, lines))
 
-	img := cx4300.Deinterleave(raw, pw, ph, *dpi, cx4300.ModeColor)
-	if err := writePNG(*out+".png", img); err != nil {
-		log.Fatal(err)
+	// An empty prefix means re-analysis of a capture already on disk: there is
+	// nothing to write, and a PNG left behind by an earlier sudo run must not
+	// be able to end the run either way.
+	if outPrefix != "" {
+		img := cx4300.Deinterleave(raw, pw, ph, dpi, cx4300.ModeColor)
+		if err := writePNG(outPrefix+".png", img); err != nil {
+			fmt.Printf("\ncould not write %s.png: %v\n", outPrefix, err)
+		} else {
+			fmt.Printf("\nwrote %s.png using the current decode\n", outPrefix)
+		}
 	}
-	fmt.Printf("\nwrote %s.png using the current decode\n", *out)
+	return rep
+}
+
+// printSummary is the point of a sweep: one place to see whether a single
+// calibration serves every resolution, or whether each needs its own.
+func printSummary(reps []report) {
+	fmt.Printf("\n================ across resolutions ================\n")
+	fmt.Printf("%6s  %-12s  %-10s  %-10s  %-10s  %-10s  %-20s  %s\n",
+		"dpi", "stride", "green lag", "left", "blue lag", "left",
+		"means R/G/B", "saturated R/G/B")
+	for _, r := range reps {
+		fmt.Printf("%6d  %-12s  %-10s  %-10s  %-10s  %-10s  %5.1f/%5.1f/%5.1f  %3.0f%%/%3.0f%%/%3.0f%%\n",
+			r.dpi, r.stride, r.lag[1], r.residual[1], r.lag[2], r.residual[2],
+			r.means[0], r.means[1], r.means[2],
+			r.clipped[0]*100, r.clipped[1]*100, r.clipped[2]*100)
+	}
+	fmt.Println()
+	for _, r := range reps {
+		fmt.Printf("  %4d dpi: %s\n", r.dpi, r.cast)
+	}
+}
+
+// gridded attaches the resolution-independent grid the colour comparison needs.
+// The coarsest resolution of the sweep sets it, and every other one is a whole
+// multiple of that, because the area is fixed and the pixel count is the area
+// times the resolution.
+func gridded(rep report, raw []byte, area cx4300.Area, pw, dpi int, resolutions []int) report {
+	coarsest := resolutions[0]
+	for _, o := range resolutions {
+		if o < coarsest {
+			coarsest = o
+		}
+	}
+	gw, gh := area.Pixels(coarsest)
+	rep.gw, rep.gh = gw, gh
+	rep.grid = resampleChannels(raw, cx4300.PlaneStride(pw, dpi), pw, dpi/coarsest, gw, gh)
+	return rep
+}
+
+// resampleChannels box-averages each colour plane down by factor onto a
+// gw x gh grid, applying the decode's plane lag on the way so that what is
+// compared is what the decode produces rather than the wire bytes.
+func resampleChannels(raw []byte, plane, width, factor, gw, gh int) [3][]float64 {
+	stride := plane * 3
+	lines := len(raw) / stride
+	lag := cx4300.PlaneRowLag()
+
+	var out [3][]float64
+	for c := range out {
+		out[c] = make([]float64, gw*gh)
+	}
+	counts := make([]float64, gw*gh)
+
+	for y := 0; y < lines; y++ {
+		gy := y / factor
+		if gy >= gh {
+			break
+		}
+		cur := raw[y*stride:]
+		above := cur
+		if y > 0 {
+			above = raw[(y-1)*stride:]
+		}
+		for x := 0; x < width; x++ {
+			gx := x / factor
+			if gx >= gw {
+				break
+			}
+			counts[gy*gw+gx]++
+			for c := 0; c < 3; c++ {
+				v := float64(cur[c*plane+x])
+				if d := lag[c]; d != 0 {
+					v = (1-d)*v + d*float64(above[c*plane+x])
+				}
+				out[c][gy*gw+gx] += v
+			}
+		}
+	}
+	for i, n := range counts {
+		if n == 0 {
+			continue
+		}
+		for c := 0; c < 3; c++ {
+			out[c][i] /= n
+		}
+	}
+	return out
+}
+
+// compareColour asks whether the other resolutions agree with 300 dpi about
+// colour, which is the one thing the per-capture checks cannot see: a swapped
+// or rotated plane order leaves every stride, lag, registration and level
+// measurement looking perfect.
+//
+// It needs a target with real colour in it. On a black-on-white page all three
+// channels carry the same signal, so no comparison can tell them apart, and it
+// says so instead of reporting a meaningless winner.
+func compareColour(reps []report) {
+	var ref *report
+	for i := range reps {
+		if reps[i].dpi == 300 {
+			ref = &reps[i]
+		}
+	}
+	if ref == nil || ref.grid[0] == nil {
+		return
+	}
+
+	fmt.Printf("\n================ do the resolutions agree about colour? ================\n")
+	fmt.Println("(300 dpi is the reference. A plane order that changes with resolution")
+	fmt.Println(" would show here and nowhere else.)")
+
+	// How distinguishable the reference's own channels are. If red, green and
+	// blue all carry the same picture, nothing below can mean anything.
+	names := [3]string{"red", "green", "blue"}
+
+	// Whether the captures agree at all is worth knowing even on a neutral
+	// target. Each is first aligned to the reference on its luminance: the scan
+	// origin and the optical sampling are not identical across resolutions, and
+	// on a page of fine text even a fraction of a cell of offset decorrelates
+	// everything. Without that step this reads geometry as a colour fault.
+	//
+	// What matters afterwards is not the absolute level - detail the coarser
+	// grid never resolved keeps it below 1 - but whether the three channels
+	// come out level with each other. A colour fault is per-channel; blur and
+	// misregistration are not.
+	fmt.Println("\n  agreement with the reference, after aligning on luminance:")
+	for i := range reps {
+		r := &reps[i]
+		if r.dpi == 300 || r.grid[0] == nil {
+			continue
+		}
+		dx, dy := bestShift(lumaGrid(r.grid), lumaGrid(ref.grid), r.gw, r.gh, 3)
+		var per [3]float64
+		var parts []string
+		for c := 0; c < 3; c++ {
+			per[c] = shiftPearson(r.grid[c], ref.grid[c], r.gw, r.gh, dx, dy)
+			parts = append(parts, fmt.Sprintf("%s %+.3f", names[c], per[c]))
+		}
+		spread := maxOf(per) - minOf(per)
+		note := fmt.Sprintf("channels level to within %.3f - no per-channel fault here", spread)
+		if spread > 0.05 {
+			note = fmt.Sprintf("UNEVEN by %.3f - one channel disagrees more than the others", spread)
+		}
+		fmt.Printf("    %4d dpi: shift (%+d,%+d)  %s\n              %s\n",
+			r.dpi, dx, dy, strings.Join(parts, "  "), note)
+	}
+
+	rg, rb, gb, least := channelIndependence(ref.grid)
+	fmt.Printf("\n  reference channel independence: R-G %.3f, R-B %.3f, G-B %.3f\n", rg, rb, gb)
+	if least > 0.98 {
+		fmt.Println("  TARGET TOO NEUTRAL for the plane-order test: the three channels carry")
+		fmt.Println("  the same picture, so a swapped order is invisible. Put something with")
+		fmt.Println("  saturated colour on the glass - a printed colour block, a book cover -")
+		fmt.Println("  and sweep again.")
+		return
+	}
+	fmt.Println("\n  plane order:")
+	for i := range reps {
+		r := &reps[i]
+		if r.dpi == 300 || r.grid[0] == nil {
+			continue
+		}
+		fmt.Printf("\n  %d dpi against 300 dpi:\n", r.dpi)
+		match, scores := bestChannelMatch(r.grid, ref.grid)
+		for c := 0; c < 3; c++ {
+			var parts []string
+			for k := 0; k < 3; k++ {
+				parts = append(parts, fmt.Sprintf("%s %+.3f", names[k], scores[c][k]))
+			}
+			verdict := "matches"
+			if match[c] != c {
+				verdict = "MISMATCH: this plane is the reference's " + names[match[c]]
+			}
+			fmt.Printf("    its %-5s vs reference  %s   -> %s\n",
+				names[c], strings.Join(parts, "  "), verdict)
+		}
+	}
+}
+
+// bestChannelMatch reports, for each of the test capture's channels, which
+// reference channel it correlates with most, along with the whole 3x3 of
+// scores. An identity mapping means the two captures agree about which plane
+// is which; anything else is a plane order that changes with resolution.
+func bestChannelMatch(test, ref [3][]float64) (match [3]int, scores [3][3]float64) {
+	for c := 0; c < 3; c++ {
+		best, bestScore := 0, -2.0
+		for k := 0; k < 3; k++ {
+			v := pearson(test[c], ref[k])
+			scores[c][k] = v
+			if v > bestScore {
+				best, bestScore = k, v
+			}
+		}
+		match[c] = best
+	}
+	return match, scores
+}
+
+// channelIndependence is the weakest correlation among the three channel pairs
+// of one capture. Near 1 means all three carry the same picture - a neutral
+// target - and no channel comparison against it can mean anything.
+func channelIndependence(g [3][]float64) (rg, rb, gb, least float64) {
+	rg = pearson(g[0], g[1])
+	rb = pearson(g[0], g[2])
+	gb = pearson(g[1], g[2])
+	return rg, rb, gb, math.Min(rg, math.Min(rb, gb))
+}
+
+// lumaGrid collapses the three channels of a grid to one luminance series, so
+// two captures can be aligned on their content rather than on any one channel.
+func lumaGrid(g [3][]float64) []float64 {
+	out := make([]float64, len(g[0]))
+	for i := range out {
+		out[i] = 0.299*g[0][i] + 0.587*g[1][i] + 0.114*g[2][i]
+	}
+	return out
+}
+
+// bestShift finds the whole-cell offset that best aligns a onto b. The scan
+// origin is not identical at every resolution, and an unaligned comparison
+// measures that instead of what it set out to measure.
+func bestShift(a, b []float64, gw, gh, span int) (dx, dy int) {
+	best := -2.0
+	for y := -span; y <= span; y++ {
+		for x := -span; x <= span; x++ {
+			if v := shiftPearson(a, b, gw, gh, x, y); v > best {
+				best, dx, dy = v, x, y
+			}
+		}
+	}
+	return dx, dy
+}
+
+// shiftPearson correlates a against b with b displaced by (dx,dy) cells, over
+// whatever part of the grid both cover.
+func shiftPearson(a, b []float64, gw, gh, dx, dy int) float64 {
+	var as, bs []float64
+	for y := 0; y < gh; y++ {
+		sy := y + dy
+		if sy < 0 || sy >= gh {
+			continue
+		}
+		for x := 0; x < gw; x++ {
+			sx := x + dx
+			if sx < 0 || sx >= gw {
+				continue
+			}
+			ai, bi := y*gw+x, sy*gw+sx
+			if ai >= len(a) || bi >= len(b) {
+				continue
+			}
+			as = append(as, a[ai])
+			bs = append(bs, b[bi])
+		}
+	}
+	if len(as) < 16 {
+		return 0
+	}
+	return pearson(as, bs)
+}
+
+// pearson is the correlation of two equal-length series.
+func pearson(a, b []float64) float64 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	ma, mb := mean(a[:n]), mean(b[:n])
+	var num, da, db float64
+	for i := 0; i < n; i++ {
+		x, y := a[i]-ma, b[i]-mb
+		num += x * y
+		da += x * x
+		db += y * y
+	}
+	if da == 0 || db == 0 {
+		return 0
+	}
+	return num / math.Sqrt(da*db)
+}
+
+// whiteLevels is each channel's 95th percentile, which on a page with margins
+// is the paper. Comparing the three is how a colour cast shows up as a number
+// rather than an impression.
+func whiteLevels(raw []byte, stride, plane, width, lines int) [3]float64 {
+	var out [3]float64
+	for c := 0; c < 3; c++ {
+		var hist [256]int
+		n := 0
+		for y := 0; y < lines; y++ {
+			row := raw[y*stride+c*plane:]
+			for x := 0; x < width; x++ {
+				hist[row[x]]++
+				n++
+			}
+		}
+		want, seen := int(float64(n)*0.95), 0
+		for v := 0; v < 256; v++ {
+			seen += hist[v]
+			if seen >= want {
+				out[c] = float64(v)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func channelMeans(raw []byte, stride, plane, width, lines int) [3]float64 {
+	var out [3]float64
+	for c := 0; c < 3; c++ {
+		sum := 0
+		for y := 0; y < lines; y++ {
+			row := raw[y*stride+c*plane:]
+			for x := 0; x < width; x++ {
+				sum += int(row[x])
+			}
+		}
+		out[c] = float64(sum) / float64(width*lines)
+	}
+	return out
+}
+
+// describeCast turns the channel means into a verdict. The means only speak for
+// the colours actually on the page, so heavy clipping is reported alongside:
+// saturated pixels are 255 in every channel and pull the means together
+// whatever the gains behind them are doing.
+func describeCast(means [3]float64, clipped [3]float64) string {
+	spread := maxOf(means) - minOf(means)
+	caveat := ""
+	if maxOf(clipped) > 0.25 {
+		caveat = fmt.Sprintf(" (%.0f%% of pixels are saturated, which flattens this - "+
+			"recapture over something with no blown highlights to be sure)",
+			maxOf(clipped)*100)
+	}
+	switch {
+	case spread < 2:
+		return fmt.Sprintf("neutral: channel means span %.2f counts%s", spread, caveat)
+	case spread < 6:
+		return fmt.Sprintf("slight cast: channel means span %.2f counts%s", spread, caveat)
+	default:
+		return fmt.Sprintf("CAST: channel means span %.2f counts - a neutral page "+
+			"will not look neutral%s", spread, caveat)
+	}
+}
+
+// clippedFraction is how much of each channel sits at 255. A scan that blows
+// its highlights has thrown away the detail a white balance would be read from.
+func clippedFraction(raw []byte, stride, plane, width, lines int) [3]float64 {
+	var out [3]float64
+	for c := 0; c < 3; c++ {
+		n := 0
+		for y := 0; y < lines; y++ {
+			row := raw[y*stride+c*plane:]
+			for x := 0; x < width; x++ {
+				if row[x] == 0xff {
+					n++
+				}
+			}
+		}
+		out[c] = float64(n) / float64(width*lines)
+	}
+	return out
+}
+
+func maxOf(v [3]float64) float64 {
+	m := v[0]
+	for _, x := range v {
+		if x > m {
+			m = x
+		}
+	}
+	return m
+}
+
+func minOf(v [3]float64) float64 {
+	m := v[0]
+	for _, x := range v {
+		if x < m {
+			m = x
+		}
+	}
+	return m
 }
 
 type cand struct {
@@ -233,60 +743,32 @@ func findStride(raw []byte, lo, hi int) strideResult {
 	}
 }
 
-// planeOffset finds the vertical shift that best aligns plane b onto plane a,
-// correlating their per-row means and interpolating the peak against its
-// neighbours so a fraction of a row still shows. It refuses to answer when the
-// rows carry too little contrast, or when the correlation has no distinct peak,
-// because a flat curve there means the capture cannot decide - which is a
-// different statement from "the planes are aligned".
-func planeOffset(raw []byte, stride, plane, width, lines, a, b int) (dy float64, ok bool, curve string) {
-	// Differenced rather than high-passed with a window: a moving-average
-	// high-pass whose width is near the content's own period distorts phase and
-	// walks the peak off the true offset. Differencing has linear phase, and its
-	// half-row delay is identical for both planes, so it cancels here.
-	ra := difference(rowMeans(raw, stride, plane, width, lines, a))
-	rb := difference(rowMeans(raw, stride, plane, width, lines, b))
-	if stddev(ra) < 1.0 || stddev(rb) < 1.0 {
-		return 0, false, ""
-	}
-	const span = 6
-	scores := make(map[int]float64, 2*span+1)
-	best, bestScore := 0, -2.0
+// curveText renders the correlations either side of the chosen offset.
+func curveText(m cx4300.LagMeasurement, c int) string {
 	var parts []string
-	for s := -span; s <= span; s++ {
-		v := correlate(ra, rb, s)
-		scores[s] = v
-		if v > bestScore {
-			best, bestScore = s, v
+	for i, v := range m.Curve[c] {
+		if s := m.CurveFrom + i; s >= -3 && s <= 3 {
+			parts = append(parts, fmt.Sprintf("%+d:%.3f", s, v))
 		}
 	}
-	// Printed around the winner, so the peak the offset came from is visible
-	// even when it sits several rows out.
-	lo, hi := best-3, best+3
-	if lo < -span {
-		lo, hi = -span, -span+6
+	return strings.Join(parts, "  ")
+}
+
+// applyLag mixes each row mean with the one above it, exactly as the decode
+// mixes the pixels: a linear mix of lines is a linear mix of their means.
+func applyLag(rows []float64, lag float64) []float64 {
+	if lag == 0 {
+		return rows
 	}
-	if hi > span {
-		lo, hi = span-6, span
+	out := make([]float64, len(rows))
+	for i := range rows {
+		above := i - 1
+		if above < 0 {
+			above = 0
+		}
+		out[i] = (1-lag)*rows[i] + lag*rows[above]
 	}
-	for s := lo; s <= hi; s++ {
-		parts = append(parts, fmt.Sprintf("%+d:%.3f", s, scores[s]))
-	}
-	curve = strings.Join(parts, "  ")
-	// A genuine alignment stands above its neighbours; a flat curve decides nothing.
-	if bestScore < 0.3 || best == -span || best == span {
-		return 0, false, curve
-	}
-	if margin := bestScore - math.Max(scores[best-1], scores[best+1]); margin < 0.02 {
-		return 0, false, curve + "   (no distinct peak)"
-	}
-	l, r := scores[best-1], scores[best+1]
-	denom := 2 * (2*bestScore - l - r)
-	frac := 0.0
-	if denom != 0 {
-		frac = (r - l) / denom
-	}
-	return float64(best) + frac, true, curve
+	return out
 }
 
 func rowMeans(raw []byte, stride, plane, width, lines, c int) []float64 {

@@ -214,15 +214,11 @@ func TestDeinterleave(t *testing.T) {
 }
 
 // The row splitter carries one line of history, so a plane cannot be allowed to
-// trail by a whole line or more.
+// trail by a whole line or more. Validate enforces it for any calibration, and
+// the built-in one has to satisfy its own rule.
 func TestPlaneRowLag(t *testing.T) {
-	if planeRowLag[0] != 0 {
-		t.Errorf("red is the reference plane, its lag must be 0, got %v", planeRowLag[0])
-	}
-	for i, lag := range planeRowLag {
-		if lag < 0 || lag >= 1 {
-			t.Errorf("plane %d lag %v is outside [0,1) - the row splitter keeps only one line", i, lag)
-		}
+	if err := BuiltinCalibration().Validate(); err != nil {
+		t.Errorf("the built-in calibration is not usable: %v", err)
 	}
 }
 
@@ -233,12 +229,13 @@ func TestPlaneRowLag(t *testing.T) {
 func TestDeinterleaveCorrectsPlaneLag(t *testing.T) {
 	const w, h, dpi = 4, 12, 300
 	plane := PlaneStride(w, dpi)
+	lag := ActiveCalibration().PlaneRowLag
 	content := func(y float64) byte { return byte(20 + 10*y) }
 	raw := make([]byte, plane*3*h)
 	for y := 0; y < h; y++ {
 		for c := 0; c < 3; c++ {
 			for x := 0; x < w; x++ {
-				raw[y*plane*3+c*plane+x] = content(float64(y) + planeRowLag[c])
+				raw[y*plane*3+c*plane+x] = content(float64(y) + lag[c])
 			}
 		}
 	}
@@ -386,6 +383,101 @@ func TestParamsValidate(t *testing.T) {
 		err := tc.p.Validate()
 		if (err == nil) != tc.ok {
 			t.Errorf("%s: Validate() = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}
+
+func TestSamplingAndPixelSize(t *testing.T) {
+	area := Area{X: 0, Y: 0, W: 1200, H: 1200} // 2 x 2 inch
+	for _, tc := range []struct {
+		name       string
+		dpi        int
+		oversample bool
+		wantDPI    int
+		wantBox    int
+		wantW      int
+	}{
+		{"75 oversampled", 75, true, 300, 4, 150},
+		{"150 oversampled", 150, true, 300, 2, 300},
+		{"300 is already optical", 300, true, 300, 1, 600},
+		{"600 is above optical", 600, true, 600, 1, 1200},
+		{"75 native", 75, false, 75, 1, 150},
+		{"150 native", 150, false, 150, 1, 300},
+	} {
+		p := Params{DPI: tc.dpi, Area: area, Oversample: tc.oversample}
+		gotDPI, gotBox := p.sampling()
+		if gotDPI != tc.wantDPI || gotBox != tc.wantBox {
+			t.Errorf("%s: sampling() = %d dpi box %d, want %d box %d",
+				tc.name, gotDPI, gotBox, tc.wantDPI, tc.wantBox)
+		}
+		// Oversampling must not change the size of the image the caller gets.
+		if w, _ := p.PixelSize(); w != tc.wantW {
+			t.Errorf("%s: PixelSize width %d, want %d", tc.name, w, tc.wantW)
+		}
+	}
+}
+
+// An oversampled scan drives the device at OpticalDPI and averages whole boxes
+// down, so the result is the same size as a native scan of the same area and
+// each pixel is the mean of its box.
+func TestOversampledScanAveragesBoxes(t *testing.T) {
+	const want = 75
+	area := Area{X: 0, Y: 0, W: 16 * Unit / want, H: 8 * Unit / want}
+	p := Params{DPI: want, Area: area, Oversample: true}
+
+	dpi, box := p.sampling()
+	if dpi != OpticalDPI || box != 4 {
+		t.Fatalf("sampling() = %d dpi box %d, want %d box 4", dpi, box, OpticalDPI)
+	}
+	sw, sh := area.Pixels(dpi)
+	outW, outH := p.PixelSize()
+	if outW != sw/box || outH != sh/box {
+		t.Fatalf("output %dx%d does not match source %dx%d folded by %d",
+			outW, outH, sw, sh, box)
+	}
+
+	// Each source pixel carries its own row number in every channel, so the
+	// average over a box is the mean of the box's rows - a value the test can
+	// state independently of the decode. The scale keeps the deepest row
+	// inside a byte, so nothing wraps.
+	plane := PlaneStride(sw, dpi)
+	wire := make([]byte, plane*3*sh)
+	for y := 0; y < sh; y++ {
+		for c := 0; c < 3; c++ {
+			for x := 0; x < plane; x++ {
+				wire[y*plane*3+c*plane+x] = byte(7 * y)
+			}
+		}
+	}
+
+	var rows [][]byte
+	gotW, gotH, err := New(&fakeScanner{wire: wire}).ScanRows(p, func(_ int, row []byte) error {
+		rows = append(rows, append([]byte(nil), row...))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ScanRows: %v", err)
+	}
+	if gotW != outW || gotH != outH {
+		t.Fatalf("delivered %dx%d rows, want %dx%d", gotW, gotH, outW, outH)
+	}
+	for y, row := range rows {
+		// Rows 4y..4y+3 of the source fold into output row y. The plane lag
+		// mixes each row with the one above it, and on a ramp that shifts the
+		// mean by the lag itself, so allow a couple of counts.
+		wantVal := 0.0
+		for k := 0; k < box; k++ {
+			wantVal += float64(7 * (y*box + k))
+		}
+		wantVal /= float64(box)
+		for x := 0; x < gotW; x++ {
+			for c := 0; c < 3; c++ {
+				got := float64(row[x*3+c])
+				if diff := got - wantVal; diff < -10 || diff > 10 {
+					t.Fatalf("output pixel (%d,%d) channel %d = %.0f, want about %.0f",
+						x, y, c, got, wantVal)
+				}
+			}
 		}
 	}
 }

@@ -176,6 +176,9 @@ func (w *WIA) Scan(p Params) (image.Image, error) {
 	if w.progress != nil {
 		w.progress(1, 1)
 	}
+	// Oversampling is not applied here: WIA is driven at the resolution asked
+	// for, and the helper gives no access to the planes this would average.
+	//
 	// WIA is asked for colour whatever the mode: the helper drives the vendor's
 	// own dialogue-free path and exposing its intent settings buys nothing when
 	// the same luma average is a pixel loop away.

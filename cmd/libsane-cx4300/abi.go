@@ -16,6 +16,7 @@ type (
 	saneWord   = C.SANE_Word
 	saneInt    = C.SANE_Int
 	saneFixed  = C.SANE_Fixed
+	saneBool   = C.SANE_Bool
 	saneStatus = C.SANE_Status
 	saneAction = C.SANE_Action
 	saneRange  = C.SANE_Range
@@ -40,6 +41,7 @@ const (
 	infoReloadOptions = C.SANE_INFO_RELOAD_OPTIONS
 	infoReloadParams  = C.SANE_INFO_RELOAD_PARAMS
 
+	typeBool   = C.SANE_TYPE_BOOL
 	typeInt    = C.SANE_TYPE_INT
 	typeFixed  = C.SANE_TYPE_FIXED
 	typeGroup  = C.SANE_TYPE_GROUP

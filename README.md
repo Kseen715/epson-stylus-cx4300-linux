@@ -233,6 +233,76 @@ Two things worth knowing:
   fails immediately. With
   `Restart=on-failure` in the unit, a NAS that is still booting is retried.
 
+## Calibrating your own scanner
+
+One part of the decode is per unit rather than per model: the sensor reads its
+three colour planes on slightly different rows, and by how much is a property of
+the individual scanner. The built-in numbers were measured on the unit this
+driver was written against. Another unit may differ, and if it does, colour
+comes out fringed on fine detail.
+
+Put a printed page on the glass against the top-left corner - text, a table,
+anything with detail running across it - and run:
+
+```sh
+sudo escan calibrate
+```
+
+It scans a 3 x 2 inch window once at each resolution the device offers, and for
+each one it:
+
+* checks the wire line length against the padding rule the decode assumes. That
+  rule was measured on one unit; if yours pads differently every image it
+  produces is sheared, colour is the least of the problem, and the sweep stops
+  rather than storing numbers for a scanner that cannot decode at all.
+* measures how far green and blue trail red, and how well that measurement
+  correlated.
+* reads the channel levels, and warns if they are more than a few counts apart.
+  This driver applies no per-channel gain, because the unit it was written
+  against needed none; a unit that does need it would show up here.
+
+The four measurements are then combined, weighted by how well each aligned, and
+the spread between them reported - the lag does not vary with resolution, so a
+wide spread is a sign to distrust the result. Finally it applies the calibration
+it arrived at back to the captures it came from and checks that it leaves the
+planes better aligned than whatever was in force before. If it does not, nothing
+is written: measuring a number and that number helping are different things.
+
+The result goes to `/etc/escan-calibration.json`. Both escan and the SANE
+backend read it at startup, so calibrating once serves the web UI and every SANE
+frontend. `--quick` measures at 300 dpi only, which is faster and skips the
+cross-resolution agreement check. To see what is in force without scanning:
+
+```sh
+escan calibrate --show
+```
+
+```
+built-in:  green 0.17, blue 0.90
+stored:    green 0.21, blue 0.88   <- in force
+           from /etc/escan-calibration.json
+           measured Thu, 17 Sep 2026 23:00:00 MSK
+           on "Color   Color MFP01     0119"
+           correlation green 0.981, blue 0.974
+           spread across resolutions green 0.07, blue 0.12
+```
+
+`--dry-run` measures and prints without writing. `--calibration <path>` puts the
+file somewhere else - useful without root - and `escan --calibration <path>`,
+or `calibration = <path>` in the settings file, makes the server read it from
+there; the SANE backend takes `CX4300_CALIBRATION` in the environment.
+
+It will not write a guess. A blank sheet or an empty platen has no detail to
+align, and a plane it could not measure keeps its previous value and says so;
+if neither plane could be measured, nothing is written and it exits non-zero. A
+corrupt or out-of-range file is refused at startup with a warning, and the
+built-in values stay in force rather than wrong colour being applied quietly.
+
+The calibration is deliberately not per resolution. Measured across 75, 150, 300
+and 600 dpi, the plane lag, the horizontal registration and the channel gains
+were the same at every resolution - the lag is in wire lines, not in inches - so
+one set of numbers serves them all. See [PROTOCOL.md](PROTOCOL.md).
+
 ## Scanning from ordinary applications
 
 The SANE backend (`libsane-cx4300.so.1`) makes the scanner look like any other
@@ -245,12 +315,24 @@ scanimage --resolution 300 --format=png > a.png
 scanimage --resolution 150 -l 20 -t 30 -x 100 -y 150 --format=png > crop.png
 ```
 
-It offers `resolution` (75, 150, 300 or 600 dpi), `mode` (`Color` or `Gray`) and
-the four geometry options `-l/-t/-x/-y` in millimetres, and nothing else.
+It offers `resolution` (75, 150, 300 or 600 dpi), `mode` (`Color` or `Gray`),
+`oversample`, and the four geometry options `-l/-t/-x/-y` in millimetres.
 
 ```sh
 scanimage --mode Gray --resolution 300 --format=png > page.png
 ```
+
+`oversample` is on by default and matters below 300 dpi. The sensor reads its
+three colour planes on different rows, and under 300 dpi the device subsamples
+rather than averaging, so each plane aliases fine detail differently and thin
+near-horizontal lines come out fringed with colour - badly at 75 dpi, visibly
+at 150. Scanning at 300 and averaging down removes it. Measured as the mean
+channel difference over one window of line art, for a 75 dpi result: 33.1
+counts scanned natively, 17.1 taken from 300 dpi. Taking it from 600 gives
+17.0, so 300 is where it stops paying. The cost is the 300 dpi sweep's time;
+turn it off with `--oversample=false` (escan) or `--oversample=no` (scanimage)
+if speed matters more. It does nothing at 300 dpi or above, and previews in the
+web UI never oversample - framing is what a preview is for.
 
 The hardware itself only ever scans 24-bit colour, so `Gray` is computed here:
 each pixel becomes the luma average of the three colour planes. It is worth

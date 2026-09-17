@@ -159,24 +159,73 @@ func (d *Device) Identify() (DeviceInfo, error) {
 
 // Scan performs one scan and returns the image. The caller must not run two
 // scans concurrently against the same device; concurrent access wedges it.
+// It is built through the same row path streaming callers use, so the package
+// has one decode rather than two that can drift apart.
 func (d *Device) Scan(p Params) (image.Image, error) {
-	raw, width, height, err := d.ScanRaw(p)
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	width, height := p.PixelSize()
+	pixel := p.Mode.BytesPerPixel()
+
+	var img image.Image
+	var pix []byte
+	var rowBytes int
+	if p.Mode == ModeGray {
+		g := image.NewGray(image.Rect(0, 0, width, height))
+		img, pix, rowBytes = g, g.Pix, g.Stride
+	} else {
+		c := image.NewRGBA(image.Rect(0, 0, width, height))
+		img, pix, rowBytes = c, c.Pix, c.Stride
+	}
+
+	got := 0
+	_, _, err := d.ScanRows(p, func(y int, row []byte) error {
+		if y >= height {
+			return nil
+		}
+		o := y * rowBytes
+		if pixel == 1 {
+			copy(pix[o:], row)
+		} else {
+			for x := 0; x < width; x++ {
+				pix[o+x*4+0] = row[x*3+0]
+				pix[o+x*4+1] = row[x*3+1]
+				pix[o+x*4+2] = row[x*3+2]
+				pix[o+x*4+3] = 0xff
+			}
+		}
+		got = y + 1
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	return Deinterleave(raw, width, height, p.DPI, p.Mode), nil
+	if got < height {
+		// The device ended the image early; hand back what it did send rather
+		// than a frame with a blank tail.
+		switch v := img.(type) {
+		case *image.Gray:
+			return v.SubImage(image.Rect(0, 0, width, got)), nil
+		case *image.RGBA:
+			return v.SubImage(image.Rect(0, 0, width, got)), nil
+		}
+	}
+	return img, nil
 }
 
 // ScanRaw performs one scan and returns the bytes exactly as the device sent
-// them, along with the pixel dimensions that were requested. The data is
+// them, along with the source pixel dimensions - which are the oversampled
+// ones when Oversample applies, since that is what the device produced. The data is
 // planar and padded - see Deinterleave, which Scan applies for you. Use this
 // when you need the wire format itself, for instance to check the plane stride.
 func (d *Device) ScanRaw(p Params) (raw []byte, width, height int, err error) {
 	if err := p.Validate(); err != nil {
 		return nil, 0, 0, err
 	}
-	width, height = p.Area.Pixels(p.DPI)
-	raw = make([]byte, 0, WireSize(width, height, p.DPI))
+	dpi, _ := p.sampling()
+	width, height = p.Area.Pixels(dpi)
+	raw = make([]byte, 0, WireSize(width, height, dpi))
 	err = d.scan(p, func(chunk []byte) error {
 		raw = append(raw, chunk...)
 		return nil
@@ -205,12 +254,16 @@ func (d *Device) ScanRows(p Params, fn func(y int, row []byte) error) (width, he
 	if err := p.Validate(); err != nil {
 		return 0, 0, err
 	}
-	width, _ = p.Area.Pixels(p.DPI)
-	rows := newRowSplitter(width, p.DPI, p.Mode, fn)
+	dpi, box := p.sampling()
+	src, _ := p.Area.Pixels(dpi)
+	rows := newRowSplitter(src, dpi, box, p.Mode, fn)
 	if err := d.scan(p, rows.write); err != nil {
 		return 0, 0, err
 	}
-	return width, rows.lines, nil
+	if err := rows.finish(); err != nil {
+		return 0, 0, err
+	}
+	return rows.width, rows.lines, nil
 }
 
 // scan runs the command sequence for one scan, handing each block of image data
@@ -220,8 +273,9 @@ func (d *Device) scan(p Params, sink func(chunk []byte) error) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	width, height := p.Area.Pixels(p.DPI)
-	total := WireSize(width, height, p.DPI)
+	dpi, _ := p.sampling()
+	width, height := p.Area.Pixels(dpi)
+	total := WireSize(width, height, dpi)
 
 	d.drain()
 
@@ -243,7 +297,7 @@ func (d *Device) scan(p Params, sink func(chunk []byte) error) error {
 	}
 	defer d.command("RELEASE UNIT", []byte{0x17, 0, 0, 0, 0, 0}, nil, 0)
 
-	win := BuildSetWindow(p.DPI, p.Area)
+	win := BuildSetWindow(dpi, p.Area)
 	setWindow := []byte{0x24, 0, 0, 0, 0, 0, 0, 0, byte(len(win)), 0}
 	if _, err := d.command("SET WINDOW", setWindow, win, 0); err != nil {
 		return err

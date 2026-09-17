@@ -25,6 +25,7 @@ const (
 	optModeGroup
 	optMode
 	optResolution
+	optOversample
 	optGeometryGroup
 	optTLX
 	optTLY
@@ -120,6 +121,17 @@ func buildOptions() []C.SANE_Option_Descriptor {
 	o.constraint_type = C.SANE_CONSTRAINT_WORD_LIST
 	setConstraint(o, unsafe.Pointer(resolutionList()))
 
+	o = &opts[optOversample]
+	o.name = C.CString("oversample")
+	o.title = C.CString("Oversample below 300 dpi")
+	o.desc = C.CString("Below 300 dpi, scan at 300 and average down. The three colour " +
+		"planes read different rows, so under 300 dpi they alias fine detail " +
+		"differently and thin lines come out fringed with colour; averaging a 300 dpi " +
+		"sweep removes it, at the cost of that sweep's time. No effect at 300 dpi or above.")
+	o._type = C.SANE_TYPE_BOOL
+	o.size = C.sizeof_SANE_Word
+	o.cap = C.SANE_CAP_SOFT_SELECT | C.SANE_CAP_SOFT_DETECT
+
 	o = &opts[optGeometryGroup]
 	o.title = C.CString("Geometry")
 	o._type = C.SANE_TYPE_GROUP
@@ -150,6 +162,13 @@ func buildOptions() []C.SANE_Option_Descriptor {
 		setConstraint(o, unsafe.Pointer(g.rng))
 	}
 	return opts
+}
+
+func boolToSANE(v bool) C.SANE_Bool {
+	if v {
+		return C.SANE_TRUE
+	}
+	return C.SANE_FALSE
 }
 
 // setConstraint writes a pointer into the descriptor's constraint union, which
@@ -230,6 +249,8 @@ func (h *handle) controlOption(option int, action C.SANE_Action, value unsafe.Po
 			buf[len(name)] = 0
 		case optResolution:
 			*(*C.SANE_Int)(value) = C.SANE_Int(h.dpi)
+		case optOversample:
+			*(*C.SANE_Bool)(value) = boolToSANE(h.oversample)
 		case optTLX, optTLY, optBRX, optBRY:
 			*(*C.SANE_Fixed)(value) = *h.geometry(option)
 		default:
@@ -257,6 +278,11 @@ func (h *handle) controlOption(option int, action C.SANE_Action, value unsafe.Po
 			h.dpi = got
 			*(*C.SANE_Int)(value) = C.SANE_Int(got)
 			setInfo(info, C.SANE_INFO_RELOAD_PARAMS, got != want)
+		case optOversample:
+			h.oversample = *(*C.SANE_Bool)(value) == C.SANE_TRUE
+			// The image size does not change, but the time it takes does, and
+			// a frontend showing an estimate should ask again.
+			setInfo(info, C.SANE_INFO_RELOAD_PARAMS, false)
 		case optTLX, optTLY, optBRX, optBRY:
 			want := *(*C.SANE_Fixed)(value)
 			got := h.setGeometry(option, want)

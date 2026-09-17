@@ -261,7 +261,7 @@ func (s *server) handleLive(w http.ResponseWriter, r *http.Request) {
 // until its mains lead is pulled if a transfer is abandoned part way through,
 // so the only safe way to stop early is to stop caring about what arrives.
 func scanStreaming(sc cx4300.StreamScanner, p cx4300.Params, l *live, stopped func() bool) (image.Image, error) {
-	width, height := p.Area.Pixels(p.DPI)
+	width, height := p.PixelSize()
 	pixel := p.Mode.BytesPerPixel()
 	full := image.Rect(0, 0, width, height)
 

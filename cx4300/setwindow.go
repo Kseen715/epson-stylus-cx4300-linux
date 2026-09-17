@@ -140,37 +140,6 @@ func PlaneStride(width, dpi int) int {
 // wire: three padded colour planes per line.
 func WireSize(width, height, dpi int) int { return PlaneStride(width, dpi) * 3 * height }
 
-// planeRowLag is how far each colour plane trails the red one, in wire lines.
-//
-// Measured, not guessed: the device hands all three planes of a line together,
-// but green and blue do not describe the same row of the page as red, so a grey
-// printed dither sampled through them comes out with a hue that rotates across
-// the page, and horizontal edges get a colour fringe.
-//
-// From two captures of the same document, a table with rules and text at 300
-// and at 600 dpi, aligning each plane's differenced row means against red's:
-//
-//	          300 dpi   600 dpi
-//	green      0.15      0.18
-//	blue       0.85      0.95
-//
-// The lag is in lines, not inches - a sensor with its three rows physically
-// apart would double from 300 to 600 dpi, and this does not - so it is applied
-// per line at every resolution rather than scaled.
-var planeRowLag = [3]float64{0, 0.17, 0.90}
-
-// planeLagWeight is planeRowLag as the 1/256 share of the previous wire line to
-// mix into each plane, so the resample stays integer. The row splitter keeps
-// one line of history, so every lag must be under one line; TestPlaneRowLag
-// holds that invariant.
-var planeLagWeight = func() [3]int {
-	var w [3]int
-	for i, lag := range planeRowLag {
-		w[i] = int(math.Round(lag * 256))
-	}
-	return w
-}()
-
 // Rec. 601 luma weights over 256, which is what ModeGray averages the three
 // planes with. They sum to exactly 256, so a neutral grey pixel keeps its
 // value rather than drifting by a count.
@@ -181,9 +150,9 @@ const (
 )
 
 // planeValue reads one pixel of one colour plane, resampled to red's row by
-// mixing in that plane's share of the previous wire line.
-func planeValue(cur, prev []byte, plane, c, x int) byte {
-	w := planeLagWeight[c]
+// mixing in w/256 of the previous wire line - that plane's share, from the
+// calibration in force when the scan started.
+func planeValue(cur, prev []byte, plane, c, x, w int) byte {
 	v := cur[c*plane+x]
 	if w == 0 {
 		return v
@@ -195,53 +164,85 @@ func planeValue(cur, prev []byte, plane, c, x int) byte {
 // cur, at pixStride bytes per pixel: RGB for ModeColor, a single luma byte for
 // ModeGray. prev is the wire line above, which planeValue resamples against;
 // for the first line of an image, pass cur as prev - there is nothing above it.
-func writeRow(dst []byte, pixStride int, mode Mode, cur, prev []byte, plane, width int) {
+// lagW is the plane lag as 1/256 weights, read once per scan.
+func writeRow(dst []byte, pixStride int, mode Mode, cur, prev []byte, plane, width int, lagW [3]int) {
 	if mode == ModeGray {
 		for x := 0; x < width; x++ {
-			r := int(planeValue(cur, prev, plane, 0, x))
-			g := int(planeValue(cur, prev, plane, 1, x))
-			b := int(planeValue(cur, prev, plane, 2, x))
+			r := int(planeValue(cur, prev, plane, 0, x, lagW[0]))
+			g := int(planeValue(cur, prev, plane, 1, x, lagW[1]))
+			b := int(planeValue(cur, prev, plane, 2, x, lagW[2]))
 			dst[x*pixStride] = byte((lumaR*r + lumaG*g + lumaB*b + 128) >> 8)
 		}
 		return
 	}
 	for c := 0; c < 3; c++ {
 		for x := 0; x < width; x++ {
-			dst[x*pixStride+c] = planeValue(cur, prev, plane, c, x)
+			dst[x*pixStride+c] = planeValue(cur, prev, plane, c, x, lagW[c])
 		}
 	}
 }
 
-// rowSplitter turns the device's planar wire format into interleaved RGB rows
-// as the bytes arrive, so a scan can be streamed instead of buffered. Blocks
-// from the device do not line up with lines on the wire, so whatever is left
-// over after the last whole line is carried into the next block.
+// rowSplitter turns the device's planar wire format into output rows as the
+// bytes arrive, so a scan can be streamed instead of buffered. Blocks from the
+// device do not line up with lines on the wire, so whatever is left over after
+// the last whole line is carried into the next block.
+//
+// It also folds the oversampling box: with box > 1 it averages every box
+// source rows and columns into one output pixel, which is what makes a clean
+// 75 or 150 dpi scan out of a 300 dpi sweep.
 //
 // The row it passes to emit is reused, so a consumer that keeps it must copy.
 type rowSplitter struct {
 	emit   func(y int, row []byte) error
 	mode   Mode
-	width  int // pixels per row
-	pixel  int // bytes per pixel in the emitted row
-	plane  int // padded pixels per colour plane
-	stride int // bytes per wire line, all three planes
+	src    int    // source pixels per row
+	width  int    // output pixels per row
+	box    int    // source pixels folded into one output pixel, each axis
+	pixel  int    // bytes per pixel in the emitted row
+	plane  int    // padded pixels per colour plane
+	stride int    // bytes per wire line, all three planes
+	lagW   [3]int // plane lag weights, fixed for the whole scan
 	held   []byte
 	prev   []byte // previous whole wire line, for the planeRowLag resample
-	row    []byte
-	lines  int
+	srcRow []byte // one decoded source row
+	row    []byte // one output row
+	lines  int    // output rows emitted
+
+	// The output row being accumulated, how many source rows have gone into
+	// it, and how many source columns fold into each output column. The last
+	// row and column may be built from fewer than box of them, so the divisor
+	// is counted rather than assumed.
+	acc  []uint32
+	accN int
+	cols []uint32
 }
 
-func newRowSplitter(width, dpi int, mode Mode, emit func(y int, row []byte) error) *rowSplitter {
-	plane, pixel := PlaneStride(width, dpi), mode.BytesPerPixel()
-	return &rowSplitter{
+func newRowSplitter(src, dpi, box int, mode Mode, emit func(y int, row []byte) error) *rowSplitter {
+	plane, pixel := PlaneStride(src, dpi), mode.BytesPerPixel()
+	width := src / box
+	w := &rowSplitter{
 		emit:   emit,
 		mode:   mode,
+		lagW:   lagWeights(ActiveCalibration().PlaneRowLag),
+		src:    src,
 		width:  width,
+		box:    box,
 		pixel:  pixel,
 		plane:  plane,
 		stride: plane * 3,
+		srcRow: make([]byte, src*pixel),
 		row:    make([]byte, width*pixel),
 	}
+	if box > 1 {
+		w.acc = make([]uint32, width*pixel)
+		w.cols = make([]uint32, width)
+		for x := 0; x < src; x++ {
+			if gx := x / box; gx < width {
+				w.cols[gx]++
+			}
+		}
+	}
+	return w
 }
 
 func (w *rowSplitter) write(chunk []byte) error {
@@ -250,25 +251,87 @@ func (w *rowSplitter) write(chunk []byte) error {
 	for len(w.held)-done >= w.stride {
 		line := w.held[done : done+w.stride]
 		above := line
-		if w.lines > 0 {
+		if w.lines > 0 || w.accN > 0 {
 			above = w.prev
 		}
-		writeRow(w.row, w.pixel, w.mode, line, above, w.plane, w.width)
-		if err := w.emit(w.lines, w.row); err != nil {
+		writeRow(w.srcRow, w.pixel, w.mode, line, above, w.plane, w.src, w.lagW)
+		if err := w.take(w.srcRow); err != nil {
 			return err
 		}
 		w.prev = append(w.prev[:0], line...)
 		done += w.stride
-		w.lines++
 	}
 	w.held = append(w.held[:0], w.held[done:]...)
 	return nil
 }
 
+// take consumes one decoded source row, emitting an output row whenever one is
+// complete.
+func (w *rowSplitter) take(src []byte) error {
+	if w.box == 1 {
+		copy(w.row, src)
+		return w.emitRow()
+	}
+	for x := 0; x < w.src; x++ {
+		gx := x / w.box
+		if gx >= w.width {
+			break
+		}
+		for c := 0; c < w.pixel; c++ {
+			w.acc[gx*w.pixel+c] += uint32(src[x*w.pixel+c])
+		}
+	}
+	w.accN++
+	if w.accN >= w.box {
+		return w.flush()
+	}
+	return nil
+}
+
+// flush averages the accumulated source rows into one output row. It is also
+// what finish calls for a part-built row at the end of a scan.
+func (w *rowSplitter) flush() error {
+	if w.accN == 0 {
+		return nil
+	}
+	for x := 0; x < w.width; x++ {
+		n := uint32(w.accN) * w.cols[x]
+		if n == 0 {
+			n = 1
+		}
+		for c := 0; c < w.pixel; c++ {
+			w.row[x*w.pixel+c] = byte(w.acc[x*w.pixel+c] / n)
+		}
+	}
+	for i := range w.acc {
+		w.acc[i] = 0
+	}
+	w.accN = 0
+	return w.emitRow()
+}
+
+func (w *rowSplitter) emitRow() error {
+	if err := w.emit(w.lines, w.row); err != nil {
+		return err
+	}
+	w.lines++
+	return nil
+}
+
+// finish emits a part-built output row, for a scan whose height is not a whole
+// number of boxes. Without it the last row of an oversampled scan is dropped.
+func (w *rowSplitter) finish() error {
+	if w.box == 1 {
+		return nil
+	}
+	return w.flush()
+}
+
 // Deinterleave converts the device's planar output into an image. Each scan
 // line arrives as three consecutive colour planes - the whole red row, then
 // green, then blue - each padded to PlaneStride pixels; the padding columns are
-// dropped here and each plane is resampled to red's row by planeRowLag. The
+// dropped here and each plane is resampled to red's row by the calibration's
+// plane lag. The
 // resolution is needed because the padding depends on it, and the mode decides
 // whether the result is RGB or the luma average of the three planes.
 // Short input yields a correspondingly short image rather than an error, so a
@@ -276,6 +339,7 @@ func (w *rowSplitter) write(chunk []byte) error {
 func Deinterleave(raw []byte, width, height, dpi int, mode Mode) image.Image {
 	plane := PlaneStride(width, dpi)
 	stride := plane * 3
+	lagW := lagWeights(ActiveCalibration().PlaneRowLag)
 	lines := height
 	if got := len(raw) / stride; got < lines {
 		lines = got
@@ -300,7 +364,7 @@ func Deinterleave(raw []byte, width, height, dpi int, mode Mode) image.Image {
 			above = raw[(y-1)*stride : y*stride]
 		}
 		row := pix[y*pixStride:]
-		writeRow(row, pixelBytes, mode, cur, above, plane, width)
+		writeRow(row, pixelBytes, mode, cur, above, plane, width, lagW)
 		if pixelBytes == 4 {
 			for x := 0; x < width; x++ {
 				row[x*4+3] = 0xff
